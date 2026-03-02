@@ -29,8 +29,8 @@ end
 
 ```elixir
 bash = JustBash.new()
-{result, _} = JustBash.exec(bash, ~s(echo "Hello" > greeting.txt))
-{result, _} = JustBash.exec(bash, "cat greeting.txt")
+{_result, bash} = JustBash.exec(bash, ~s(echo "Hello" > greeting.txt))
+{result, _bash} = JustBash.exec(bash, "cat greeting.txt")
 result.stdout  #=> "Hello\n"
 result.exit_code  #=> 0
 ```
