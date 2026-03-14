@@ -4,10 +4,11 @@ defmodule JustBash.Eval.Task do
   """
 
   @type task :: %{
-          name: String.t(),
-          description: String.t(),
-          files: %{String.t() => String.t()},
-          validators: [JustBash.Eval.Validator.validator()]
+          required(:name) => String.t(),
+          required(:description) => String.t(),
+          required(:files) => %{String.t() => String.t()},
+          required(:validators) => [JustBash.Eval.Validator.validator()],
+          optional(:commands) => %{String.t() => module()}
         }
 
   @callback tasks() :: [task()]

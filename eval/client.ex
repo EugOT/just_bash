@@ -93,9 +93,8 @@ defmodule JustBash.Eval.Client do
   defp extract_usage(_), do: %{input_tokens: 0, output_tokens: 0}
 
   defp api_key! do
-    case Application.get_env(:just_bash, :anthropic_api_key) ||
-           System.get_env("ANTHROPIC_API_KEY") do
-      nil -> raise "Missing ANTHROPIC_API_KEY — set it in env or config/runtime.exs"
+    case System.get_env("ANTHROPIC_API_KEY") do
+      nil -> raise "Missing ANTHROPIC_API_KEY environment variable"
       "" -> raise "ANTHROPIC_API_KEY is empty"
       key -> key
     end
