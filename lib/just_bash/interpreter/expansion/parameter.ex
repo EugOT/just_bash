@@ -321,9 +321,17 @@ defmodule JustBash.Interpreter.Expansion.Parameter do
     {apply_case_modification(str, direction, all), []}
   end
 
-  defp expand_with_operation(bash, _name, value, %AST.Indirection{}) do
-    var_name = value || ""
-    {Map.get(bash.env, var_name, ""), []}
+  defp expand_with_operation(bash, name, value, %AST.Indirection{}) do
+    if String.ends_with?(name, "[@]") or String.ends_with?(name, "[*]") do
+      # ${!arr[@]} or ${!arr[*]} — list array keys
+      arr_name = String.replace(name, ~r/\[[@*]\]$/, "")
+      keys = extract_array_keys(bash.env, arr_name)
+      {Enum.join(keys, " "), []}
+    else
+      # ${!VAR} — simple indirection
+      var_name = value || ""
+      {Map.get(bash.env, var_name, ""), []}
+    end
   end
 
   defp expand_with_operation(_bash, _name, value, %AST.ErrorIfUnset{
@@ -346,6 +354,19 @@ defmodule JustBash.Interpreter.Expansion.Parameter do
   end
 
   # Helper functions
+
+  defp extract_array_keys(env, arr_name) do
+    prefix = arr_name <> "["
+
+    env
+    |> Enum.filter(fn {k, _v} ->
+      String.starts_with?(k, prefix) and not String.starts_with?(k, "__")
+    end)
+    |> Enum.map(fn {k, _v} ->
+      k |> String.trim_leading(prefix) |> String.trim_trailing("]")
+    end)
+    |> Enum.sort()
+  end
 
   defp count_array_elements(bash, arr_name) do
     bash.env

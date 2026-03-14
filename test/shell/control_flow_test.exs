@@ -724,5 +724,37 @@ defmodule JustBash.Shell.ControlFlowTest do
       values = String.split(String.trim(result.stdout)) |> Enum.sort()
       assert values == ["1", "2"]
     end
+
+    test "declare -A all keys with ${!arr[@]}" do
+      bash = JustBash.new()
+
+      {result, _} =
+        JustBash.exec(bash, """
+        declare -A map
+        map[x]=1
+        map[y]=2
+        echo ${!map[@]}
+        """)
+
+      keys = String.split(String.trim(result.stdout)) |> Enum.sort()
+      assert keys == ["x", "y"]
+    end
+
+    test "declare -A iterate keys with for loop" do
+      bash = JustBash.new()
+
+      {result, _} =
+        JustBash.exec(bash, """
+        declare -A colors
+        colors[red]="#ff0000"
+        colors[blue]="#0000ff"
+        for k in ${!colors[@]}; do
+          echo "$k=${colors[$k]}"
+        done
+        """)
+
+      lines = String.trim(result.stdout) |> String.split("\n") |> Enum.sort()
+      assert lines == ["blue=#0000ff", "red=#ff0000"]
+    end
   end
 end

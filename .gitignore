@@ -21,6 +21,7 @@ just_bash-*.tar
 *~
 
 .env
+eval_results/
 
 # OS
 .DS_Store

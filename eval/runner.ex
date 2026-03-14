@@ -1,6 +1,12 @@
 defmodule JustBash.Eval.Runner do
   @moduledoc """
-  Runs eval tasks and reports results.
+  Runs eval tasks with retry, concurrency, and result persistence.
+
+  Features:
+  - Per-task retry (configurable, default 1 attempt)
+  - Concurrent execution via Task.async_stream
+  - JSONL result persistence to eval_results/
+  - Token usage and cost tracking
   """
 
   alias JustBash.Eval.{Agent, Tasks, Validator}
@@ -14,16 +20,46 @@ defmodule JustBash.Eval.Runner do
           validators: [validator_result()],
           turns: non_neg_integer(),
           error: String.t() | nil,
-          time_ms: non_neg_integer()
+          time_ms: non_neg_integer(),
+          usage: map(),
+          attempt: pos_integer()
         }
+
+  @results_dir "eval_results"
+
+  # Sonnet pricing per 1M tokens
+  @input_cost_per_million 1.0
+  @output_cost_per_million 5.0
 
   @doc """
   Run all eval tasks and return results.
+
+  Options:
+    - `:tasks` — list of tasks (default: all)
+    - `:retries` — max attempts per task (default: 1)
+    - `:concurrency` — max concurrent tasks (default: 4)
+    - `:verbose` — print progress (default: false)
+    - `:persist` — write results to JSONL (default: true)
   """
   @spec run_all(keyword()) :: [task_result()]
   def run_all(opts \\ []) do
     tasks = Keyword.get(opts, :tasks, Tasks.all())
-    Enum.map(tasks, &run_task(&1, opts))
+    concurrency = Keyword.get(opts, :concurrency, 4)
+    persist? = Keyword.get(opts, :persist, true)
+
+    results =
+      tasks
+      |> Task.async_stream(
+        fn task -> run_task(task, opts) end,
+        max_concurrency: concurrency,
+        timeout: :infinity,
+        ordered: true
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    if persist?, do: persist_results(results)
+
+    results
   end
 
   @doc """
@@ -31,31 +67,66 @@ defmodule JustBash.Eval.Runner do
   """
   @spec run_by_name(String.t(), keyword()) :: task_result()
   def run_by_name(name, opts \\ []) do
-    case Enum.find(Tasks.all(), &(&1.name == name)) do
-      nil ->
-        %{
-          name: name,
-          passed: false,
-          validators: [],
-          turns: 0,
-          error: "Task not found",
-          time_ms: 0
-        }
+    persist? = Keyword.get(opts, :persist, true)
 
-      task ->
-        run_task(task, opts)
-    end
+    result =
+      case Enum.find(Tasks.all(), &(&1.name == name)) do
+        nil ->
+          %{
+            name: name,
+            passed: false,
+            validators: [],
+            turns: 0,
+            error: "Task not found",
+            time_ms: 0,
+            usage: %{input_tokens: 0, output_tokens: 0},
+            attempt: 0
+          }
+
+        task ->
+          run_task(task, opts)
+      end
+
+    if persist?, do: persist_results([result])
+
+    result
   end
 
   @doc """
-  Run a single task and return the result.
+  Run a single task with retry support.
   """
   @spec run_task(Tasks.task(), keyword()) :: task_result()
   def run_task(task, opts \\ []) do
     verbose = Keyword.get(opts, :verbose, false)
+    retries = Keyword.get(opts, :retries, 1)
 
     if verbose, do: IO.puts("\n--- Running: #{task.name} ---")
 
+    run_with_retry(task, opts, 1, retries, nil)
+  end
+
+  defp run_with_retry(_task, _opts, attempt, max_attempts, last_result)
+       when attempt > max_attempts do
+    last_result
+  end
+
+  defp run_with_retry(task, opts, attempt, max_attempts, _last_result) do
+    verbose = Keyword.get(opts, :verbose, false)
+
+    if attempt > 1 and verbose,
+      do: IO.puts("  retry #{attempt}/#{max_attempts} for #{task.name}")
+
+    result = execute_task(task, opts, attempt)
+
+    if result.passed do
+      result
+    else
+      run_with_retry(task, opts, attempt + 1, max_attempts, result)
+    end
+  end
+
+  defp execute_task(task, opts, attempt) do
+    verbose = Keyword.get(opts, :verbose, false)
     start = System.monotonic_time(:millisecond)
     bash = setup_filesystem(task.files)
 
@@ -75,7 +146,9 @@ defmodule JustBash.Eval.Runner do
             validators: validator_results,
             turns: agent_result.turns,
             error: nil,
-            time_ms: time_ms
+            time_ms: time_ms,
+            usage: agent_result.usage,
+            attempt: attempt
           }
 
         {:error, reason} ->
@@ -89,7 +162,9 @@ defmodule JustBash.Eval.Runner do
             validators: [],
             turns: 0,
             error: error_msg,
-            time_ms: time_ms
+            time_ms: time_ms,
+            usage: %{input_tokens: 0, output_tokens: 0},
+            attempt: attempt
           }
       end
     rescue
@@ -104,7 +179,9 @@ defmodule JustBash.Eval.Runner do
           validators: [],
           turns: 0,
           error: error_msg,
-          time_ms: time_ms
+          time_ms: time_ms,
+          usage: %{input_tokens: 0, output_tokens: 0},
+          attempt: attempt
         }
     end
   end
@@ -121,17 +198,31 @@ defmodule JustBash.Eval.Runner do
     total_validators = results |> Enum.flat_map(& &1.validators) |> length()
     passed_validators = results |> Enum.flat_map(& &1.validators) |> Enum.count(& &1.passed)
 
+    total_input = results |> Enum.map(&get_in(&1, [:usage, :input_tokens])) |> Enum.sum()
+    total_output = results |> Enum.map(&get_in(&1, [:usage, :output_tokens])) |> Enum.sum()
+
+    cost =
+      total_input / 1_000_000 * @input_cost_per_million +
+        total_output / 1_000_000 * @output_cost_per_million
+
     IO.puts("\n" <> String.duplicate("=", 70))
 
     IO.puts(
-      "EVAL RESULTS: #{passed}/#{total} tasks passed | #{passed_validators}/#{total_validators} validators passed | #{total_time}ms"
+      "EVAL RESULTS: #{passed}/#{total} tasks passed | " <>
+        "#{passed_validators}/#{total_validators} validators passed | #{total_time}ms"
+    )
+
+    IO.puts(
+      "TOKENS: #{total_input} in + #{total_output} out | " <>
+        "COST: $#{Float.round(cost, 3)}"
     )
 
     IO.puts(String.duplicate("=", 70))
 
     for r <- results do
       status = if r.passed, do: color("PASS", :green), else: color("FAIL", :red)
-      IO.puts("  #{status}  #{r.name} (#{r.turns} turns, #{r.time_ms}ms)")
+      retry_note = if r.attempt > 1, do: " (attempt #{r.attempt})", else: ""
+      IO.puts("  #{status}  #{r.name} (#{r.turns} turns, #{r.time_ms}ms#{retry_note})")
 
       if r.error do
         IO.puts("        #{color(r.error, :red)}")
@@ -147,6 +238,54 @@ defmodule JustBash.Eval.Runner do
 
     IO.puts(String.duplicate("=", 70))
     :ok
+  end
+
+  # --- Result persistence ---
+
+  defp persist_results(results) do
+    File.mkdir_p!(@results_dir)
+
+    timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
+    commit_sha = get_commit_sha()
+
+    run_record = %{
+      timestamp: timestamp,
+      commit: commit_sha,
+      total_tasks: length(results),
+      passed: Enum.count(results, & &1.passed),
+      total_time_ms: results |> Enum.map(& &1.time_ms) |> Enum.sum(),
+      total_input_tokens: results |> Enum.map(&get_in(&1, [:usage, :input_tokens])) |> Enum.sum(),
+      total_output_tokens:
+        results |> Enum.map(&get_in(&1, [:usage, :output_tokens])) |> Enum.sum(),
+      tasks:
+        Enum.map(results, fn r ->
+          %{
+            name: r.name,
+            passed: r.passed,
+            turns: r.turns,
+            time_ms: r.time_ms,
+            attempt: r.attempt,
+            input_tokens: get_in(r, [:usage, :input_tokens]),
+            output_tokens: get_in(r, [:usage, :output_tokens]),
+            error: r.error,
+            validators:
+              Enum.map(r.validators, fn v ->
+                %{name: v.name, passed: v.passed, error: v.error}
+              end)
+          }
+        end)
+    }
+
+    path = Path.join(@results_dir, "results.jsonl")
+    line = Jason.encode!(run_record) <> "\n"
+    File.write!(path, line, [:append])
+  end
+
+  defp get_commit_sha do
+    case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
+      {sha, 0} -> String.trim(sha)
+      _ -> "unknown"
+    end
   end
 
   # --- Private ---

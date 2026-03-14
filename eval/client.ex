@@ -1,10 +1,18 @@
 defmodule JustBash.Eval.Client do
   @moduledoc """
   Minimal Anthropic API client for the eval agent loop.
+
+  Includes retry with exponential backoff for transient failures (429, 500, 529).
+  Tracks token usage from API responses.
   """
 
   @api_url "https://api.anthropic.com/v1/messages"
-  @model "claude-sonnet-4-20250514"
+  @model "claude-haiku-4-5-20251001"
+  @max_retries 3
+  @base_delay_ms 1_000
+  @retryable_statuses [429, 500, 502, 503, 529]
+
+  @type usage :: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer()}
 
   def chat(messages, opts \\ []) do
     api_key = api_key!()
@@ -21,24 +29,68 @@ defmodule JustBash.Eval.Client do
       |> maybe_put(:system, system)
       |> maybe_put(:tools, if(tools != [], do: tools))
 
+    headers = [
+      {"x-api-key", api_key},
+      {"anthropic-version", "2023-06-01"}
+    ]
+
+    do_request(body, headers, 0)
+  end
+
+  defp do_request(body, headers, attempt) do
     case Req.post(@api_url,
            json: body,
-           headers: [
-             {"x-api-key", api_key},
-             {"anthropic-version", "2023-06-01"}
-           ],
+           headers: headers,
            receive_timeout: 120_000
          ) do
-      {:ok, %{status: 200, body: body}} ->
-        {:ok, body}
+      {:ok, %{status: 200, body: resp_body}} ->
+        usage = extract_usage(resp_body)
+        {:ok, Map.put(resp_body, "usage", usage)}
 
-      {:ok, %{status: status, body: body}} ->
-        {:error, {status, body}}
+      {:ok, %{status: status, body: resp_body}} when status in @retryable_statuses ->
+        if attempt < @max_retries do
+          delay = backoff_delay(attempt)
+          Process.sleep(delay)
+          do_request(body, headers, attempt + 1)
+        else
+          {:error, {status, resp_body}}
+        end
+
+      {:ok, %{status: status, body: resp_body}} ->
+        {:error, {status, resp_body}}
+
+      {:error, %Req.TransportError{} = error} ->
+        if attempt < @max_retries do
+          delay = backoff_delay(attempt)
+          Process.sleep(delay)
+          do_request(body, headers, attempt + 1)
+        else
+          {:error, error}
+        end
 
       {:error, reason} ->
-        {:error, reason}
+        if attempt < @max_retries do
+          delay = backoff_delay(attempt)
+          Process.sleep(delay)
+          do_request(body, headers, attempt + 1)
+        else
+          {:error, reason}
+        end
     end
   end
+
+  defp backoff_delay(attempt) do
+    # Exponential backoff with jitter: base * 2^attempt + random(0..base)
+    base = @base_delay_ms * Integer.pow(2, attempt)
+    jitter = :rand.uniform(@base_delay_ms)
+    base + jitter
+  end
+
+  defp extract_usage(%{"usage" => %{"input_tokens" => input, "output_tokens" => output}}) do
+    %{input_tokens: input, output_tokens: output}
+  end
+
+  defp extract_usage(_), do: %{input_tokens: 0, output_tokens: 0}
 
   defp api_key! do
     case Application.get_env(:just_bash, :anthropic_api_key) ||

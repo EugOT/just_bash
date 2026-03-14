@@ -32,12 +32,15 @@ defmodule JustBash.Eval.Agent do
     }
   }
 
+  @type usage :: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer()}
+
   @type result :: %{
           success: boolean(),
           turns: non_neg_integer(),
           messages: [map()],
           bash: JustBash.t(),
-          final_response: String.t()
+          final_response: String.t(),
+          usage: usage()
         }
 
   @doc """
@@ -67,22 +70,16 @@ defmodule JustBash.Eval.Agent do
       - Be efficient. Read input files if needed, then do the work and write output. Don't waste \
       calls on verification unless something went wrong.
       - The environment already has files pre-loaded. Do NOT create sample data — read what exists.
-      - Avoid [[ =~ ]] regex matching — use grep or case/glob patterns instead.
-      - Avoid heredocs with <<'EOF' inside scripts passed to the tool — use echo/printf instead.
-      - `declare -A` (associative arrays) is NOT supported. Use temp files, `grep -c`, or \
-      `sort | uniq -c` instead.
-      - `grep` does not support `\\{n\\}` BRE syntax. Use `[0-9][0-9][0-9][0-9]` instead of \
-      `[0-9]\\{4\\}`.
-      - `bash` command is not available (no `bash script.sh`). Write commands directly.
       - When done, respond with a one-line summary.\
       """)
 
     messages = [%{role: "user", content: task}]
+    state = %{bash: bash, usage: %{input_tokens: 0, output_tokens: 0}}
 
-    loop(messages, bash, system, 0, max_turns, verbose)
+    loop(messages, state, system, 0, max_turns, verbose)
   end
 
-  defp loop(messages, bash, _system, turn, max_turns, verbose) when turn >= max_turns do
+  defp loop(messages, state, _system, turn, max_turns, verbose) when turn >= max_turns do
     if verbose, do: log(:warn, "  max turns (#{max_turns}) reached")
 
     {:ok,
@@ -90,18 +87,20 @@ defmodule JustBash.Eval.Agent do
        success: false,
        turns: turn,
        messages: messages,
-       bash: bash,
-       final_response: "Max turns (#{max_turns}) reached"
+       bash: state.bash,
+       final_response: "Max turns (#{max_turns}) reached",
+       usage: state.usage
      }}
   end
 
-  defp loop(messages, bash, system, turn, max_turns, verbose) do
+  defp loop(messages, state, system, turn, max_turns, verbose) do
     if verbose, do: log(:info, "  turn #{turn + 1}/#{max_turns}")
 
     case Client.chat(messages, system: system, tools: [@bash_tool]) do
-      {:ok, %{"content" => content, "stop_reason" => stop_reason}} ->
+      {:ok, %{"content" => content, "stop_reason" => stop_reason, "usage" => turn_usage}} ->
         if verbose, do: log_assistant_response(content, stop_reason)
 
+        state = accumulate_usage(state, turn_usage)
         messages = messages ++ [%{role: "assistant", content: content}]
 
         case stop_reason do
@@ -113,13 +112,14 @@ defmodule JustBash.Eval.Agent do
                success: true,
                turns: turn + 1,
                messages: messages,
-               bash: bash,
-               final_response: text
+               bash: state.bash,
+               final_response: text,
+               usage: state.usage
              }}
 
           "tool_use" ->
-            {messages, bash} = handle_tool_calls(content, messages, bash, verbose)
-            loop(messages, bash, system, turn + 1, max_turns, verbose)
+            {messages, state} = handle_tool_calls(content, messages, state, verbose)
+            loop(messages, state, system, turn + 1, max_turns, verbose)
 
           other ->
             {:error, {:unexpected_stop_reason, other}}
@@ -131,12 +131,13 @@ defmodule JustBash.Eval.Agent do
     end
   end
 
-  defp handle_tool_calls(content, messages, bash, verbose) do
+  defp handle_tool_calls(content, messages, state, verbose) do
     tool_uses = Enum.filter(content, fn block -> block["type"] == "tool_use" end)
 
-    {tool_result_blocks, final_bash} =
-      Enum.reduce(tool_uses, {[], bash}, fn
-        %{"id" => id, "name" => "bash", "input" => %{"command" => command}}, {acc, bash} ->
+    {tool_result_blocks, state} =
+      Enum.reduce(tool_uses, {[], state}, fn
+        %{"id" => id, "name" => "bash", "input" => %{"command" => command}},
+        {acc, %{bash: bash} = st} ->
           if verbose, do: log(:cmd, "  $ #{command}")
 
           {result, bash} = JustBash.exec(bash, command)
@@ -157,12 +158,24 @@ defmodule JustBash.Eval.Agent do
             |> Enum.join("\n")
 
           block = %{type: "tool_result", tool_use_id: id, content: output}
-          {acc ++ [block], bash}
+          {acc ++ [block], %{st | bash: bash}}
       end)
 
     messages = messages ++ [%{role: "user", content: tool_result_blocks}]
-    {messages, final_bash}
+    {messages, state}
   end
+
+  defp accumulate_usage(state, %{input_tokens: input, output_tokens: output}) do
+    %{
+      state
+      | usage: %{
+          input_tokens: state.usage.input_tokens + input,
+          output_tokens: state.usage.output_tokens + output
+        }
+    }
+  end
+
+  defp accumulate_usage(state, _), do: state
 
   defp extract_text(content) do
     content

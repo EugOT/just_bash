@@ -45,19 +45,20 @@ defmodule JustBash.Commands.Awk do
   end
 
   defp execute_program(bash, opts, stdin, program) do
-    case get_content(bash, opts.files, stdin) do
+    case get_file_data(bash, opts.files, stdin) do
       {:error, msg} ->
         {Command.error(msg), bash}
 
-      {:ok, data} ->
+      {:ok, file_data} ->
         eval_opts = %{
           field_separator: opts.field_separator,
           variables: opts.variables,
-          bash: bash
+          bash: bash,
+          files: file_data
         }
 
         {output, exit_code, file_outputs, updated_bash} =
-          Evaluator.execute(data, program, eval_opts)
+          Evaluator.execute(program, eval_opts)
 
         bash = updated_bash || bash
 
@@ -80,10 +81,11 @@ defmodule JustBash.Commands.Awk do
     end
   end
 
-  defp get_content(_bash, [], stdin), do: {:ok, stdin}
+  # Returns {:ok, [{filename, content}, ...]} for multi-file support
+  defp get_file_data(_bash, [], stdin), do: {:ok, [{"", stdin}]}
 
-  defp get_content(bash, files, _stdin) do
-    read_files(bash, files)
+  defp get_file_data(bash, files, _stdin) do
+    read_files_with_names(bash, files)
   end
 
   defp parse_args(args) do
@@ -168,12 +170,12 @@ defmodule JustBash.Commands.Awk do
     end
   end
 
-  defp read_files(bash, files) do
-    Enum.reduce_while(files, {:ok, ""}, fn file, {:ok, acc} ->
+  defp read_files_with_names(bash, files) do
+    Enum.reduce_while(files, {:ok, []}, fn file, {:ok, acc} ->
       resolved = InMemoryFs.resolve_path(bash.cwd, file)
 
       case InMemoryFs.read_file(bash.fs, resolved) do
-        {:ok, content} -> {:cont, {:ok, acc <> content}}
+        {:ok, content} -> {:cont, {:ok, acc ++ [{resolved, content}]}}
         {:error, _} -> {:halt, {:error, "awk: #{file}: No such file or directory\n"}}
       end
     end)

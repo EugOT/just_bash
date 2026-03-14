@@ -427,4 +427,54 @@ defmodule JustBash.Commands.JqTest do
       assert parsed == %{"name" => "bob"}
     end
   end
+
+  describe "jq -e (exit status)" do
+    test "returns exit code 0 for truthy value" do
+      bash = bash_with_json(~S({"a":1}))
+      {result, _} = JustBash.exec(bash, "jq -e '.a' /data.json")
+      assert result.exit_code == 0
+      assert String.trim(result.stdout) == "1"
+    end
+
+    test "returns exit code 1 for false output" do
+      bash = bash_with_json(~S({"a":false}))
+      {result, _} = JustBash.exec(bash, "jq -e '.a' /data.json")
+      assert result.exit_code == 1
+      assert String.trim(result.stdout) == "false"
+    end
+
+    test "returns exit code 1 for null output" do
+      bash = bash_with_json(~S({"a":null}))
+      {result, _} = JustBash.exec(bash, "jq -e '.a' /data.json")
+      assert result.exit_code == 1
+      assert String.trim(result.stdout) == "null"
+    end
+
+    test "returns exit code 1 for missing key (null)" do
+      bash = bash_with_json(~S({"a":1}))
+      {result, _} = JustBash.exec(bash, "jq -e '.missing' /data.json")
+      assert result.exit_code == 1
+      assert String.trim(result.stdout) == "null"
+    end
+
+    test "returns exit code 0 for non-null string" do
+      bash = bash_with_json(~S({"a":"hello"}))
+      {result, _} = JustBash.exec(bash, "jq -e '.a' /data.json")
+      assert result.exit_code == 0
+      assert String.trim(result.stdout) == "\"hello\""
+    end
+
+    test "returns exit code 0 for zero (not false)" do
+      bash = bash_with_json(~S({"a":0}))
+      {result, _} = JustBash.exec(bash, "jq -e '.a' /data.json")
+      assert result.exit_code == 0
+      assert String.trim(result.stdout) == "0"
+    end
+
+    test "--exit-status is alias for -e" do
+      bash = bash_with_json(~S({"a":null}))
+      {result, _} = JustBash.exec(bash, "jq --exit-status '.a' /data.json")
+      assert result.exit_code == 1
+    end
+  end
 end

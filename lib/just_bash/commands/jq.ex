@@ -50,9 +50,24 @@ defmodule JustBash.Commands.Jq do
 
       {:ok, json_input} ->
         case process_jq(json_input, opts) do
-          {:ok, output} -> {Command.ok(output), bash}
-          {:error, msg} -> {Command.error(msg), bash}
+          {:ok, results, output} ->
+            if opts.exit_status and exit_status_falsy?(results) do
+              {Command.result(output, "", 1), bash}
+            else
+              {Command.ok(output), bash}
+            end
+
+          {:error, msg} ->
+            {Command.error(msg), bash}
         end
+    end
+  end
+
+  defp exit_status_falsy?(results) do
+    case List.last(results) do
+      nil -> true
+      false -> true
+      _ -> false
     end
   end
 
@@ -95,7 +110,7 @@ defmodule JustBash.Commands.Jq do
 
       {:ok, data} ->
         case Evaluator.evaluate(ast, data, opts) do
-          {:ok, results} -> {:ok, format_output(results, opts)}
+          {:ok, results} -> {:ok, results, format_output(results, opts)}
           {:error, msg} -> {:error, "jq: #{msg}\n"}
         end
     end
