@@ -1064,4 +1064,30 @@ defmodule JustBash.Commands.AwkTest do
       assert result2.stdout == "a\nb\nc\n"
     end
   end
+
+  describe "system() function" do
+    test "system() executes a command and returns exit code as statement" do
+      bash = JustBash.new(files: %{"/data.txt" => "hello\n"})
+
+      {result, bash} =
+        JustBash.exec(bash, "awk 'BEGIN { system(\"mkdir -p /output\") }' /data.txt")
+
+      assert result.exit_code == 0
+      {result2, _} = JustBash.exec(bash, "ls /output")
+      assert result2.exit_code == 0
+    end
+
+    test "system() return value is the exit code" do
+      bash = JustBash.new(files: %{"/data.txt" => "hello\n"})
+
+      {result, _} =
+        JustBash.exec(
+          bash,
+          "awk 'BEGIN { rc = system(\"echo ok\"); print \"rc=\" rc }' /data.txt"
+        )
+
+      assert result.exit_code == 0
+      assert result.stdout =~ "rc=0"
+    end
+  end
 end

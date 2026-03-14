@@ -49,7 +49,8 @@ defmodule JustBash.Commands.Awk.Evaluator do
       arrays: %{},
       output: "",
       exit_code: nil,
-      file_outputs: %{}
+      file_outputs: %{},
+      bash: Map.get(opts, :bash)
     }
 
     state = execute_begin_blocks(state, program.begin_blocks)
@@ -76,7 +77,7 @@ defmodule JustBash.Commands.Awk.Evaluator do
         execute_end_blocks(state, program.end_blocks)
       end
 
-    {state.output, state.exit_code || 0, state.file_outputs}
+    {state.output, state.exit_code || 0, state.file_outputs, state.bash}
   end
 
   defp execute_begin_blocks(state, blocks) do
@@ -397,7 +398,8 @@ defmodule JustBash.Commands.Awk.Evaluator do
   end
 
   defp execute_statement({:assign, var, expr}, state) do
-    value = evaluate_expression(expr, state) |> to_string()
+    {raw_value, state} = evaluate_expression_with_state(expr, state)
+    value = to_string(raw_value)
 
     # Handle special variables
     case var do
@@ -655,6 +657,13 @@ defmodule JustBash.Commands.Awk.Evaluator do
   defp execute_statement({:call, "sub", args}, state) do
     {pattern, replacement, target} = extract_gsub_args(args, state)
     execute_statement({:sub, pattern, replacement, target}, state)
+  end
+
+  defp execute_statement({:call, "system", [cmd_expr]}, state) do
+    cmd = evaluate_expression(cmd_expr, state) |> to_string()
+    {exit_code, state} = execute_system_command(cmd, state)
+    # Store result in case it's also used as expression via evaluate_expression_with_state
+    %{state | variables: Map.put(state.variables, "__system_rc__", to_string(exit_code))}
   end
 
   defp extract_gsub_args([{:regex, pattern}, replacement], _state) do
@@ -1107,6 +1116,12 @@ defmodule JustBash.Commands.Awk.Evaluator do
     {new_val, new_state}
   end
 
+  def evaluate_expression_with_state({:call, "system", [cmd_expr]}, state) do
+    cmd = evaluate_expression(cmd_expr, state) |> to_string()
+    {exit_code, state} = execute_system_command(cmd, state)
+    {exit_code, state}
+  end
+
   def evaluate_expression_with_state(expr, state) do
     {evaluate_expression(expr, state), state}
   end
@@ -1348,4 +1363,19 @@ defmodule JustBash.Commands.Awk.Evaluator do
   end
 
   def parse_number(_), do: 0.0
+
+  # Execute a shell command via JustBash.exec, returning {exit_code, updated_state}
+  defp execute_system_command(cmd, state) do
+    case state.bash do
+      nil ->
+        # No bash state available, can't execute
+        {1, state}
+
+      bash ->
+        {result, new_bash} = JustBash.exec(bash, cmd)
+        # system() in awk prints stdout to awk's output
+        new_output = state.output <> result.stdout
+        {result.exit_code, %{state | output: new_output, bash: new_bash}}
+    end
+  end
 end

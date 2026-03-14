@@ -550,6 +550,49 @@ defmodule JustBash.Commands.UtilitiesTest do
       {result, _} = JustBash.exec(bash, "echo '' | read x; echo \"got:$x:\"")
       assert result.stdout == "got::\n"
     end
+
+    test "read splits into multiple variables on default IFS" do
+      bash = JustBash.new()
+      {result, _} = JustBash.exec(bash, "echo 'hello world' | read a b; echo \"$a:$b\"")
+      assert result.stdout == "hello:world\n"
+    end
+
+    test "read splits into multiple variables with remainder in last" do
+      bash = JustBash.new()
+
+      {result, _} =
+        JustBash.exec(bash, "echo 'one two three four' | read a b c; echo \"$a|$b|$c\"")
+
+      assert result.stdout == "one|two|three four\n"
+    end
+
+    test "read splits on custom IFS" do
+      bash = JustBash.new()
+
+      {result, _} =
+        JustBash.exec(bash, "echo 'a,b,c' | IFS=, read x y z; echo \"$x|$y|$z\"")
+
+      assert result.stdout == "a|b|c\n"
+    end
+
+    test "read with fewer fields than variables sets extras to empty" do
+      bash = JustBash.new()
+      {result, _} = JustBash.exec(bash, "echo 'hello' | read a b; echo \"$a|$b\"")
+      assert result.stdout == "hello|\n"
+    end
+
+    test "read with IFS in while loop for CSV processing" do
+      bash = JustBash.new(files: %{"/data.csv" => "id,name,age\n1,Alice,30\n2,Bob,25\n"})
+
+      script = """
+      sed '1d' /data.csv | while IFS=, read -r id name age; do
+        echo "$id:$name:$age"
+      done
+      """
+
+      {result, _} = JustBash.exec(bash, script)
+      assert result.stdout == "1:Alice:30\n2:Bob:25\n"
+    end
   end
 
   describe "sleep command" do

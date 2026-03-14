@@ -367,10 +367,12 @@ defmodule JustBash.Eval.Tasks do
       - "env_vars": object mapping ENV variable names to their values
       - "num_run_commands": count of RUN instructions (integer)
 
-      Use grep/sed to extract values, then use jq to construct the JSON.
-      Tip: use jq --arg and --argjson to pass extracted values into a jq filter that
-      builds the final JSON object. Avoid heredocs (<<EOF) — use echo/printf to pass
-      data to jq via pipes instead.
+      Use grep/awk to extract values, then use jq to construct the JSON.
+      Tip: use `awk '/^FROM/ {print $2}'` for the base image, `awk '/^EXPOSE/ {print $2}'`
+      for ports, `grep '^ENV'` then cut for env vars, and `grep -c '^RUN'` for the count.
+      Build the JSON object incrementally with jq: start with `echo '{}' > file` then
+      add fields with `jq --arg k "$key" --arg v "$val" '. + {($k): $v}' file > tmp && mv tmp file`.
+      Avoid heredocs (<<EOF) — use echo/printf instead.
       """,
       files: %{
         "/app/Dockerfile" =>
@@ -942,10 +944,15 @@ defmodule JustBash.Eval.Tasks do
       original alphabetical order of the source filenames. For files that don't contain
       a date, use "0000-00-00" as the date.
 
-      Write a rename log to /output/rename_log.txt with lines:
+      Write a rename log to /output/rename_log.txt with exactly 5 lines (one per file),
+      each in the format:
         old_name -> new_name
+      Do NOT include any header or extra lines — just the 5 rename entries.
 
-      Use a for loop or while-read to iterate over files.
+      IMPORTANT: One filename has a space in it ("Screenshot 2024-03-20.png").
+      Use `find /photos -maxdepth 1 -type f | sort` piped into a while-read
+      loop to handle filenames with spaces safely. Do NOT use `for f in $(ls)`.
+      Use `basename` to get just the filename from the full path.
       """,
       files: %{
         "/photos/IMG_20240101_001.jpg" => "jpeg data 1",
@@ -1625,9 +1632,12 @@ defmodule JustBash.Eval.Tasks do
 
       Use find to discover the structure and wc -c for sizes (one file at a time).
       Build the tree output with a while-read loop and printf for indentation.
+      Count depth by using `grep -o '/' | wc -l` on the relative path.
       For the JSON summary, use echo/printf to build the JSON string and pipe
       through jq for formatting. Do NOT use heredocs (<<EOF) — use echo/printf
-      to construct the JSON instead.
+      to construct the JSON instead. Do NOT use `declare -A` — it is not
+      supported. Instead, count extensions with `grep -c` on a temp file or
+      use `sort | uniq -c` on a collected list.
       """,
       files: %{
         "/project/README.md" => "# My Project\nA sample project.\n",

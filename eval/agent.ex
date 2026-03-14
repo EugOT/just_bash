@@ -69,6 +69,11 @@ defmodule JustBash.Eval.Agent do
       - The environment already has files pre-loaded. Do NOT create sample data — read what exists.
       - Avoid [[ =~ ]] regex matching — use grep or case/glob patterns instead.
       - Avoid heredocs with <<'EOF' inside scripts passed to the tool — use echo/printf instead.
+      - `declare -A` (associative arrays) is NOT supported. Use temp files, `grep -c`, or \
+      `sort | uniq -c` instead.
+      - `grep` does not support `\\{n\\}` BRE syntax. Use `[0-9][0-9][0-9][0-9]` instead of \
+      `[0-9]\\{4\\}`.
+      - `bash` command is not available (no `bash script.sh`). Write commands directly.
       - When done, respond with a one-line summary.\
       """)
 

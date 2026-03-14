@@ -52,10 +52,14 @@ defmodule JustBash.Commands.Awk do
       {:ok, data} ->
         eval_opts = %{
           field_separator: opts.field_separator,
-          variables: opts.variables
+          variables: opts.variables,
+          bash: bash
         }
 
-        {output, exit_code, file_outputs} = Evaluator.execute(data, program, eval_opts)
+        {output, exit_code, file_outputs, updated_bash} =
+          Evaluator.execute(data, program, eval_opts)
+
+        bash = updated_bash || bash
 
         # Write any file outputs from print/printf redirections
         bash =
