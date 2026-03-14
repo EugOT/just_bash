@@ -1,6 +1,5 @@
 [
   # AWK parser/evaluator type specs use internal types
-  {"lib/just_bash/commands/awk/evaluator.ex", :invalid_contract},
   {"lib/just_bash/commands/awk/evaluator.ex", :unknown_type},
   # file_outputs key is always present in initial state (line 52) but dialyzer
   # can't infer it through all execute_statement clause paths
