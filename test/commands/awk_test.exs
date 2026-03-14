@@ -982,4 +982,86 @@ defmodule JustBash.Commands.AwkTest do
       assert result.stdout == "yes\nyes\n"
     end
   end
+
+  describe "pre-increment and post-increment as expressions" do
+    test "pre-increment ++n used as array index" do
+      bash = JustBash.new(files: %{"/data.txt" => "a\nb\nc\n"})
+
+      {result, _} =
+        JustBash.exec(
+          bash,
+          "awk '{ arr[++n] = $0 } END { for (i=1; i<=n; i++) print arr[i] }' /data.txt"
+        )
+
+      assert result.stdout == "a\nb\nc\n"
+    end
+
+    test "post-increment n++ used as array index" do
+      bash = JustBash.new(files: %{"/data.txt" => "a\nb\nc\n"})
+
+      {result, _} =
+        JustBash.exec(
+          bash,
+          "awk '{ arr[n++] = $0 } END { for (i=0; i<n; i++) print arr[i] }' /data.txt"
+        )
+
+      assert result.stdout == "a\nb\nc\n"
+    end
+
+    test "pre-increment in arithmetic expression" do
+      bash = JustBash.new()
+
+      {result, _} =
+        JustBash.exec(
+          bash,
+          "echo 'x' | awk 'BEGIN { n=5 } { print ++n }'"
+        )
+
+      assert result.stdout == "6\n"
+    end
+
+    test "post-increment in arithmetic expression" do
+      bash = JustBash.new()
+
+      {result, _} =
+        JustBash.exec(
+          bash,
+          "echo 'x' | awk 'BEGIN { n=5 } { print n++ }'"
+        )
+
+      assert result.stdout == "5\n"
+    end
+  end
+
+  describe "print append redirection" do
+    test "print >> file appends output" do
+      bash = JustBash.new()
+
+      {result, bash} =
+        JustBash.exec(
+          bash,
+          "echo 'hello' | awk '{ print $0 >> \"/tmp/out.txt\" }'"
+        )
+
+      assert result.exit_code == 0
+
+      {result2, _} = JustBash.exec(bash, "cat /tmp/out.txt")
+      assert result2.stdout == "hello\n"
+    end
+
+    test "print >> file appends multiple lines" do
+      bash = JustBash.new(files: %{"/data.txt" => "a\nb\nc\n"})
+
+      {result, bash} =
+        JustBash.exec(
+          bash,
+          "awk '{ print $0 >> \"/tmp/out.txt\" }' /data.txt"
+        )
+
+      assert result.exit_code == 0
+
+      {result2, _} = JustBash.exec(bash, "cat /tmp/out.txt")
+      assert result2.stdout == "a\nb\nc\n"
+    end
+  end
 end

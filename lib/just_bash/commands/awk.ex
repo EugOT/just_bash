@@ -55,7 +55,16 @@ defmodule JustBash.Commands.Awk do
           variables: opts.variables
         }
 
-        {output, exit_code} = Evaluator.execute(data, program, eval_opts)
+        {output, exit_code, file_outputs} = Evaluator.execute(data, program, eval_opts)
+
+        # Write any file outputs from print/printf redirections
+        bash =
+          Enum.reduce(file_outputs, bash, fn {filename, content}, acc_bash ->
+            case InMemoryFs.write_file(acc_bash.fs, filename, content) do
+              {:ok, fs} -> %{acc_bash | fs: fs}
+              {:error, _} -> acc_bash
+            end
+          end)
 
         result = %{
           stdout: output,

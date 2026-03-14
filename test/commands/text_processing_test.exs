@@ -659,6 +659,26 @@ defmodule JustBash.Commands.TextProcessingTest do
       {result, _} = JustBash.exec(bash, "echo -e 'c\\na\\nb' | sort")
       assert result.stdout == "a\nb\nc\n"
     end
+
+    test "sort -k1,1nr respects reverse modifier in key spec" do
+      bash =
+        JustBash.new(
+          files: %{"/data.txt" => "      1 a\n      8 the\n      5 fox\n      4 dog\n"}
+        )
+
+      {result, _} = JustBash.exec(bash, "sort -k1,1nr /data.txt")
+      assert result.stdout == "      8 the\n      5 fox\n      4 dog\n      1 a\n"
+    end
+
+    test "sort -k1,1rn respects reverse modifier regardless of order" do
+      bash =
+        JustBash.new(
+          files: %{"/data.txt" => "      1 a\n      8 the\n      5 fox\n      4 dog\n"}
+        )
+
+      {result, _} = JustBash.exec(bash, "sort -k1,1rn /data.txt")
+      assert result.stdout == "      8 the\n      5 fox\n      4 dog\n      1 a\n"
+    end
   end
 
   describe "uniq command" do

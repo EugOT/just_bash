@@ -48,7 +48,8 @@ defmodule JustBash.Commands.Awk.Evaluator do
       variables: opts.variables,
       arrays: %{},
       output: "",
-      exit_code: nil
+      exit_code: nil,
+      file_outputs: %{}
     }
 
     state = execute_begin_blocks(state, program.begin_blocks)
@@ -75,7 +76,7 @@ defmodule JustBash.Commands.Awk.Evaluator do
         execute_end_blocks(state, program.end_blocks)
       end
 
-    {state.output, state.exit_code || 0}
+    {state.output, state.exit_code || 0, state.file_outputs}
   end
 
   defp execute_begin_blocks(state, blocks) do
@@ -110,7 +111,9 @@ defmodule JustBash.Commands.Awk.Evaluator do
   defp apply_rules([], state), do: state
 
   defp apply_rules([{pattern, action} | rest], state) do
-    if pattern_matches?(pattern, state) do
+    {matches, state} = pattern_matches?(pattern, state)
+
+    if matches do
       case execute_statements_with_control(action, state) do
         {:next, new_state} ->
           # next: skip remaining rules for this line
@@ -143,13 +146,16 @@ defmodule JustBash.Commands.Awk.Evaluator do
     end
   end
 
-  defp pattern_matches?(nil, _state), do: true
+  defp pattern_matches?(nil, state), do: {true, state}
 
   defp pattern_matches?({:regex, pattern}, state) do
-    case Regex.compile(pattern) do
-      {:ok, regex} -> Regex.match?(regex, Enum.at(state.fields, 0, ""))
-      {:error, _} -> false
-    end
+    result =
+      case Regex.compile(pattern) do
+        {:ok, regex} -> Regex.match?(regex, Enum.at(state.fields, 0, ""))
+        {:error, _} -> false
+      end
+
+    {result, state}
   end
 
   defp pattern_matches?({:condition, condition}, state) do
@@ -158,15 +164,19 @@ defmodule JustBash.Commands.Awk.Evaluator do
 
   defp evaluate_condition(condition, state) when is_binary(condition) do
     # String-based condition (from old parser) - use regex parsing
-    case evaluate_nr_condition(condition, state) do
-      nil -> evaluate_field_or_default(condition, state)
-      result -> result
-    end
+    result =
+      case evaluate_nr_condition(condition, state) do
+        nil -> evaluate_field_or_default(condition, state)
+        result -> result
+      end
+
+    {result, state}
   end
 
   defp evaluate_condition(condition, state) when is_tuple(condition) do
-    # AST-based condition (from new parser) - evaluate expression directly
-    truthy?(evaluate_expression(condition, state))
+    # AST-based condition (from new parser) - evaluate expression with side effects
+    {value, state} = evaluate_expression_with_state(condition, state)
+    {truthy?(value), state}
   end
 
   defp evaluate_field_or_default(condition, state) do
@@ -302,7 +312,11 @@ defmodule JustBash.Commands.Awk.Evaluator do
 
   defp execute_statement({:print, {:comma_sep, args}}, state) do
     # Comma-separated: use OFS between values
-    values = Enum.map(args, &evaluate_expression(&1, state))
+    {values, state} =
+      Enum.map_reduce(args, state, fn arg, acc_state ->
+        evaluate_expression_with_state(arg, acc_state)
+      end)
+
     formatted = Enum.map(values, &format_output_value/1)
     output_line = Enum.join(formatted, state.ofs) <> state.ors
     %{state | output: state.output <> output_line}
@@ -310,7 +324,11 @@ defmodule JustBash.Commands.Awk.Evaluator do
 
   defp execute_statement({:print, {:concat, args}}, state) do
     # Space-separated in source: concatenate without separator
-    values = Enum.map(args, &evaluate_expression(&1, state))
+    {values, state} =
+      Enum.map_reduce(args, state, fn arg, acc_state ->
+        evaluate_expression_with_state(arg, acc_state)
+      end)
+
     formatted = Enum.map(values, &format_output_value/1)
     output_line = Enum.join(formatted, "") <> state.ors
     %{state | output: state.output <> output_line}
@@ -318,7 +336,11 @@ defmodule JustBash.Commands.Awk.Evaluator do
 
   defp execute_statement({:print, args}, state) when is_list(args) do
     # Legacy format - treat as comma-separated for backward compatibility
-    values = Enum.map(args, &evaluate_expression(&1, state))
+    {values, state} =
+      Enum.map_reduce(args, state, fn arg, acc_state ->
+        evaluate_expression_with_state(arg, acc_state)
+      end)
+
     formatted = Enum.map(values, &format_output_value/1)
     output_line = Enum.join(formatted, state.ofs) <> state.ors
     %{state | output: state.output <> output_line}
@@ -328,6 +350,50 @@ defmodule JustBash.Commands.Awk.Evaluator do
     values = Enum.map(args, &evaluate_expression(&1, state))
     output = Formatter.format_printf(format, values)
     %{state | output: state.output <> output}
+  end
+
+  # Print/printf with output redirection to file (> and >>)
+  defp execute_statement({:print_redirect, {:comma_sep, args}, file_expr}, state) do
+    {values, state} =
+      Enum.map_reduce(args, state, fn arg, acc_state ->
+        evaluate_expression_with_state(arg, acc_state)
+      end)
+
+    filename = evaluate_expression(file_expr, state) |> to_string()
+    formatted = Enum.map(values, &format_output_value/1)
+    output_line = Enum.join(formatted, state.ofs) <> state.ors
+    # Overwrite: replace file content (but accumulate within same program run)
+    existing = Map.get(state.file_outputs, filename, "")
+    %{state | file_outputs: Map.put(state.file_outputs, filename, existing <> output_line)}
+  end
+
+  defp execute_statement({:print_append, {:comma_sep, args}, file_expr}, state) do
+    {values, state} =
+      Enum.map_reduce(args, state, fn arg, acc_state ->
+        evaluate_expression_with_state(arg, acc_state)
+      end)
+
+    filename = evaluate_expression(file_expr, state) |> to_string()
+    formatted = Enum.map(values, &format_output_value/1)
+    output_line = Enum.join(formatted, state.ofs) <> state.ors
+    existing = Map.get(state.file_outputs, filename, "")
+    %{state | file_outputs: Map.put(state.file_outputs, filename, existing <> output_line)}
+  end
+
+  defp execute_statement({:printf_redirect, {format, args}, file_expr}, state) do
+    values = Enum.map(args, &evaluate_expression(&1, state))
+    filename = evaluate_expression(file_expr, state) |> to_string()
+    output = Formatter.format_printf(format, values)
+    existing = Map.get(state.file_outputs, filename, "")
+    %{state | file_outputs: Map.put(state.file_outputs, filename, existing <> output)}
+  end
+
+  defp execute_statement({:printf_append, {format, args}, file_expr}, state) do
+    values = Enum.map(args, &evaluate_expression(&1, state))
+    filename = evaluate_expression(file_expr, state) |> to_string()
+    output = Formatter.format_printf(format, values)
+    existing = Map.get(state.file_outputs, filename, "")
+    %{state | file_outputs: Map.put(state.file_outputs, filename, existing <> output)}
   end
 
   defp execute_statement({:assign, var, expr}, state) do
@@ -400,7 +466,8 @@ defmodule JustBash.Commands.Awk.Evaluator do
 
   # Array operations
   defp execute_statement({:array_assign, array, key_expr, value_expr}, state) do
-    key = evaluate_expression(key_expr, state) |> to_string()
+    {key, state} = evaluate_expression_with_state(key_expr, state)
+    key = to_string(key)
     value = evaluate_expression(value_expr, state) |> to_string()
     arr = Map.get(state.arrays, array, %{})
     new_arr = Map.put(arr, key, value)
@@ -524,6 +591,19 @@ defmodule JustBash.Commands.Awk.Evaluator do
     end
   end
 
+  defp execute_statement({:gsub, pattern, replacement, {:variable, var}}, state) do
+    current = Map.get(state.variables, var, "")
+
+    case Regex.compile(pattern) do
+      {:ok, regex} ->
+        new_val = Regex.replace(regex, current, replacement)
+        %{state | variables: Map.put(state.variables, var, new_val)}
+
+      {:error, _} ->
+        state
+    end
+  end
+
   # sub(/pattern/, "replacement", target) - replace first occurrence only
   defp execute_statement({:sub, pattern, replacement, {:field, 0}}, state) do
     line = Enum.at(state.fields, 0, "")
@@ -547,6 +627,19 @@ defmodule JustBash.Commands.Awk.Evaluator do
         new_val = Regex.replace(regex, field_val, replacement, global: false)
         new_fields = List.replace_at(state.fields, n, new_val)
         %{state | fields: new_fields}
+
+      {:error, _} ->
+        state
+    end
+  end
+
+  defp execute_statement({:sub, pattern, replacement, {:variable, var}}, state) do
+    current = Map.get(state.variables, var, "")
+
+    case Regex.compile(pattern) do
+      {:ok, regex} ->
+        new_val = Regex.replace(regex, current, replacement, global: false)
+        %{state | variables: Map.put(state.variables, var, new_val)}
 
       {:error, _} ->
         state
@@ -878,11 +971,144 @@ defmodule JustBash.Commands.Awk.Evaluator do
     if Map.has_key?(arr, key), do: 1, else: 0
   end
 
+  # Increment/decrement as expressions (without state propagation - for backward compatibility)
+  def evaluate_expression({:increment, var}, state) do
+    # Post-increment: returns current value (side effect lost without state return)
+    current = Map.get(state.variables, var, "0")
+    parse_number(current)
+  end
+
+  def evaluate_expression({:pre_increment, var}, state) do
+    # Pre-increment: returns incremented value (side effect lost without state return)
+    current = Map.get(state.variables, var, "0")
+    parse_number(current) + 1
+  end
+
+  def evaluate_expression({:decrement, var}, state) do
+    current = Map.get(state.variables, var, "0")
+    parse_number(current)
+  end
+
+  def evaluate_expression({:pre_decrement, var}, state) do
+    current = Map.get(state.variables, var, "0")
+    parse_number(current) - 1
+  end
+
+  # Array element increment/decrement as expressions
+  def evaluate_expression({:array_increment, array, key_expr}, state) do
+    key = evaluate_expression(key_expr, state) |> to_string()
+    arr = Map.get(state.arrays, array, %{})
+    Map.get(arr, key, "0") |> parse_number()
+  end
+
+  def evaluate_expression({:array_pre_increment, array, key_expr}, state) do
+    key = evaluate_expression(key_expr, state) |> to_string()
+    arr = Map.get(state.arrays, array, %{})
+    Map.get(arr, key, "0") |> parse_number() |> Kernel.+(1)
+  end
+
+  def evaluate_expression({:array_decrement, array, key_expr}, state) do
+    key = evaluate_expression(key_expr, state) |> to_string()
+    arr = Map.get(state.arrays, array, %{})
+    Map.get(arr, key, "0") |> parse_number()
+  end
+
+  def evaluate_expression({:array_pre_decrement, array, key_expr}, state) do
+    key = evaluate_expression(key_expr, state) |> to_string()
+    arr = Map.get(state.arrays, array, %{})
+    Map.get(arr, key, "0") |> parse_number() |> Kernel.-(1)
+  end
+
   # Array access
   def evaluate_expression({:array_access, array_name, key_expr}, state) do
     key = evaluate_expression(key_expr, state) |> to_string()
     arr = Map.get(state.arrays, array_name, %{})
     Map.get(arr, key, "")
+  end
+
+  @doc """
+  Evaluate an expression and return both the value and potentially updated state.
+  Most expressions don't modify state, but increment/decrement expressions do.
+  """
+  def evaluate_expression_with_state({:increment, var}, state) do
+    current = Map.get(state.variables, var, "0")
+    current_num = parse_number(current)
+    new_state = %{state | variables: Map.put(state.variables, var, to_string(current_num + 1))}
+    {current_num, new_state}
+  end
+
+  def evaluate_expression_with_state({:pre_increment, var}, state) do
+    current = Map.get(state.variables, var, "0")
+    current_num = parse_number(current) + 1
+    new_state = %{state | variables: Map.put(state.variables, var, to_string(current_num))}
+    {current_num, new_state}
+  end
+
+  def evaluate_expression_with_state({:decrement, var}, state) do
+    current = Map.get(state.variables, var, "0")
+    current_num = parse_number(current)
+    new_state = %{state | variables: Map.put(state.variables, var, to_string(current_num - 1))}
+    {current_num, new_state}
+  end
+
+  def evaluate_expression_with_state({:pre_decrement, var}, state) do
+    current = Map.get(state.variables, var, "0")
+    current_num = parse_number(current) - 1
+    new_state = %{state | variables: Map.put(state.variables, var, to_string(current_num))}
+    {current_num, new_state}
+  end
+
+  # Logical not with potential side effects in subexpression
+  def evaluate_expression_with_state({:not, expr}, state) do
+    {val, state} = evaluate_expression_with_state(expr, state)
+    result = if truthy?(val), do: 0, else: 1
+    {result, state}
+  end
+
+  # Array element post-increment: arr[key]++ — returns old value, then increments
+  def evaluate_expression_with_state({:array_increment, array, key_expr}, state) do
+    key = evaluate_expression(key_expr, state) |> to_string()
+    arr = Map.get(state.arrays, array, %{})
+    current = Map.get(arr, key, "0") |> parse_number()
+    new_arr = Map.put(arr, key, to_string(current + 1))
+    new_state = %{state | arrays: Map.put(state.arrays, array, new_arr)}
+    {current, new_state}
+  end
+
+  # Array element pre-increment: ++arr[key] — increments, then returns new value
+  def evaluate_expression_with_state({:array_pre_increment, array, key_expr}, state) do
+    key = evaluate_expression(key_expr, state) |> to_string()
+    arr = Map.get(state.arrays, array, %{})
+    current = Map.get(arr, key, "0") |> parse_number()
+    new_val = current + 1
+    new_arr = Map.put(arr, key, to_string(new_val))
+    new_state = %{state | arrays: Map.put(state.arrays, array, new_arr)}
+    {new_val, new_state}
+  end
+
+  # Array element post-decrement: arr[key]--
+  def evaluate_expression_with_state({:array_decrement, array, key_expr}, state) do
+    key = evaluate_expression(key_expr, state) |> to_string()
+    arr = Map.get(state.arrays, array, %{})
+    current = Map.get(arr, key, "0") |> parse_number()
+    new_arr = Map.put(arr, key, to_string(current - 1))
+    new_state = %{state | arrays: Map.put(state.arrays, array, new_arr)}
+    {current, new_state}
+  end
+
+  # Array element pre-decrement: --arr[key]
+  def evaluate_expression_with_state({:array_pre_decrement, array, key_expr}, state) do
+    key = evaluate_expression(key_expr, state) |> to_string()
+    arr = Map.get(state.arrays, array, %{})
+    current = Map.get(arr, key, "0") |> parse_number()
+    new_val = current - 1
+    new_arr = Map.put(arr, key, to_string(new_val))
+    new_state = %{state | arrays: Map.put(state.arrays, array, new_arr)}
+    {new_val, new_state}
+  end
+
+  def evaluate_expression_with_state(expr, state) do
+    {evaluate_expression(expr, state), state}
   end
 
   defp get_field(state, 0), do: Enum.at(state.fields, 0, "")

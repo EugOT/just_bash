@@ -50,13 +50,18 @@ defmodule JustBash.Commands.Sort do
   end
 
   defp sort_lines(lines, %{k: key_spec} = flags) when key_spec != nil do
-    {field_num, _} = parse_key_spec(key_spec)
+    {field_num, modifiers} = parse_key_spec(key_spec)
     delimiter = flags[:t] || " "
+
+    # Key-level modifiers override global flags when present
+    numeric = modifiers[:numeric] || flags.n
+    fold_case = modifiers[:fold_case] || flags.f
+    reverse = modifiers[:reverse] || flags.r
 
     Enum.sort_by(
       lines,
-      fn line -> get_sort_key(line, field_num, delimiter, flags.n, flags.f) end,
-      sort_direction(flags.r)
+      fn line -> get_sort_key(line, field_num, delimiter, numeric, fold_case) end,
+      sort_direction(reverse)
     )
   end
 
@@ -75,11 +80,35 @@ defmodule JustBash.Commands.Sort do
   defp parse_key_spec(spec) when is_integer(spec), do: {spec, nil}
 
   defp parse_key_spec(spec) when is_binary(spec) do
-    # Parse key spec like "2" or "2,2" or "2.3"
+    # Parse key spec like "2" or "2,2" or "2,2nr" or "1,1rn"
+    # Extract field number and modifiers (n=numeric, r=reverse, f=fold-case)
     case Integer.parse(spec) do
-      {n, _} -> {n, nil}
-      :error -> {1, nil}
+      {n, rest} ->
+        modifiers = parse_key_modifiers(rest)
+        {n, modifiers}
+
+      :error ->
+        {1, %{}}
     end
+  end
+
+  defp parse_key_modifiers(rest) do
+    # After the field number, there may be ",end" and then modifier chars
+    # e.g. ",2nr" or ",1rn" or "nr" or just ""
+    chars =
+      case String.split(rest, ",", parts: 2) do
+        [_] -> rest
+        [_, end_spec] -> end_spec
+      end
+
+    # Strip any leading digits (the end field number) to get modifier letters
+    modifier_str = String.replace(chars, ~r/^[\d.]*/, "")
+
+    %{
+      numeric: String.contains?(modifier_str, "n"),
+      reverse: String.contains?(modifier_str, "r"),
+      fold_case: String.contains?(modifier_str, "f")
+    }
   end
 
   defp get_sort_key(line, field_num, delimiter, numeric, fold_case) do
