@@ -289,6 +289,17 @@ defmodule JustBash.Commands.Awk.Evaluator do
 
   defp execute_statement(nil, state), do: state
 
+  defp execute_statement(%{statements: stmts}, state) do
+    Enum.reduce_while(stmts, state, fn stmt, acc_state ->
+      case execute_statement(stmt, acc_state) do
+        {:next, _} = signal -> {:halt, signal}
+        {:break, _} = signal -> {:halt, signal}
+        {:continue, _} = signal -> {:halt, signal}
+        new_state -> {:cont, new_state}
+      end
+    end)
+  end
+
   defp execute_statement({:print, {:comma_sep, args}}, state) do
     # Comma-separated: use OFS between values
     values = Enum.map(args, &evaluate_expression(&1, state))
@@ -786,6 +797,16 @@ defmodule JustBash.Commands.Awk.Evaluator do
     if truthy?(val), do: 0, else: 1
   end
 
+  # /regex/ as expression matches against $0 (equivalent to $0 ~ /regex/)
+  def evaluate_expression({:regex, pattern}, state) do
+    line = get_field(state, 0)
+
+    case Regex.compile(pattern) do
+      {:ok, re} -> if Regex.match?(re, line), do: 1, else: 0
+      _ -> 0
+    end
+  end
+
   # Unary minus
   def evaluate_expression({:negate, expr}, state) do
     val = evaluate_expression(expr, state) |> parse_number()
@@ -924,6 +945,15 @@ defmodule JustBash.Commands.Awk.Evaluator do
     truthy?(value)
   end
 
+  defp evaluate_condition_expr({:not, expr}, state) do
+    not truthy?(evaluate_expression(expr, state))
+  end
+
+  # Catch-all: evaluate as expression and check truthiness
+  defp evaluate_condition_expr(expr, state) do
+    truthy?(evaluate_expression(expr, state))
+  end
+
   defp compare_values(left, right, op) do
     # If both can be parsed as numbers, compare numerically
     left_num = parse_number(left)
@@ -944,7 +974,15 @@ defmodule JustBash.Commands.Awk.Evaluator do
   defp truthy?(0), do: false
   defp truthy?(n) when is_float(n) and n == 0.0, do: false
   defp truthy?(""), do: false
-  defp truthy?("0"), do: false
+
+  defp truthy?(s) when is_binary(s) do
+    # In awk, strings that look like zero are falsy in boolean context
+    case Float.parse(String.trim(s)) do
+      {val, ""} -> val != 0.0
+      _ -> true
+    end
+  end
+
   defp truthy?(_), do: true
 
   # AWK built-in functions

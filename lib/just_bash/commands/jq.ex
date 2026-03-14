@@ -185,7 +185,8 @@ defmodule JustBash.Commands.Jq do
       join_output: false,
       sort_keys: false,
       tab: false,
-      help: false
+      help: false,
+      bindings: %{}
     }
   end
 
@@ -226,6 +227,22 @@ defmodule JustBash.Commands.Jq do
   defp parse_args(["--color-output" | rest], opts), do: parse_args(rest, opts)
   defp parse_args(["-M" | rest], opts), do: parse_args(rest, opts)
   defp parse_args(["--monochrome-output" | rest], opts), do: parse_args(rest, opts)
+
+  defp parse_args(["--arg", name, value | rest], opts) do
+    bindings = Map.put(opts.bindings, name, value)
+    parse_args(rest, %{opts | bindings: bindings})
+  end
+
+  defp parse_args(["--argjson", name, value | rest], opts) do
+    case Jason.decode(value) do
+      {:ok, decoded} ->
+        bindings = Map.put(opts.bindings, name, decoded)
+        parse_args(rest, %{opts | bindings: bindings})
+
+      {:error, _} ->
+        {:error, "jq: Invalid JSON text passed to --argjson\n"}
+    end
+  end
 
   defp parse_args(["-" <> _ = flag | _rest], _opts) do
     {:error, "jq: Unknown option: #{flag}\n"}

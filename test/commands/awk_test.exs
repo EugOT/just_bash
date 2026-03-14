@@ -943,4 +943,43 @@ defmodule JustBash.Commands.AwkTest do
       assert result.stdout == "1\n"
     end
   end
+
+  describe "multi-statement blocks" do
+    test "if body with multiple statements in braces" do
+      bash = JustBash.new(files: %{"/data.txt" => "1\n2\n3\n"})
+
+      cmd = "awk '{if ($1 > 1) { count++; print \"big:\", $1 }}' /data.txt"
+      {result, _} = JustBash.exec(bash, cmd)
+
+      assert result.stdout == "big: 2\nbig: 3\n"
+    end
+
+    test "if-else with multi-statement bodies" do
+      bash = JustBash.new(files: %{"/data.txt" => "a\nb\n"})
+
+      cmd =
+        "awk '{if (NR == 1) { x = \"first\"; print x } else { x = \"other\"; print x }}' /data.txt"
+
+      {result, _} = JustBash.exec(bash, cmd)
+
+      assert result.stdout == "first\nother\n"
+    end
+  end
+
+  describe "not operator in conditions" do
+    test "negation with ! in awk condition" do
+      bash = JustBash.new(files: %{"/data.txt" => "hello\nworld\n"})
+
+      cmd = "awk 'BEGIN{first=1} {if (!first) print \"not first:\", $0; first=0}' /data.txt"
+      {result, _} = JustBash.exec(bash, cmd)
+
+      assert result.stdout == "not first: world\n"
+    end
+
+    test "negation with ! in pattern" do
+      bash = JustBash.new(files: %{"/data.txt" => "yes\nno\nyes\n"})
+      {result, _} = JustBash.exec(bash, "awk '!/no/' /data.txt")
+      assert result.stdout == "yes\nyes\n"
+    end
+  end
 end

@@ -252,16 +252,42 @@ defmodule JustBash.Interpreter.Executor do
   def execute_command(bash, %AST.If{clauses: clauses, else_body: else_body}, _stdin),
     do: execute_if(bash, clauses, else_body)
 
-  def execute_command(bash, %AST.For{variable: variable, words: words, body: body}, _stdin) do
-    Loop.execute_for(bash, variable, words, body, &execute_body/2)
+  def execute_command(
+        bash,
+        %AST.For{variable: variable, words: words, body: body, redirections: redirs},
+        _stdin
+      ) do
+    {_redir_stdin, non_stdin_redirs} = Redirection.extract_heredoc_stdin(bash, redirs)
+    {result, new_bash} = Loop.execute_for(bash, variable, words, body, &execute_body/2)
+    Redirection.apply_redirections(result, new_bash, non_stdin_redirs)
   end
 
-  def execute_command(bash, %AST.While{condition: condition, body: body}, stdin) do
-    Loop.execute_while(bash, condition, body, stdin, &execute_body/2)
+  def execute_command(
+        bash,
+        %AST.While{condition: condition, body: body, redirections: redirs},
+        stdin
+      ) do
+    {redir_stdin, non_stdin_redirs} = Redirection.extract_heredoc_stdin(bash, redirs)
+    effective_stdin = redir_stdin || stdin
+
+    {result, new_bash} =
+      Loop.execute_while(bash, condition, body, effective_stdin, &execute_body/2)
+
+    Redirection.apply_redirections(result, new_bash, non_stdin_redirs)
   end
 
-  def execute_command(bash, %AST.Until{condition: condition, body: body}, stdin) do
-    Loop.execute_until(bash, condition, body, stdin, &execute_body/2)
+  def execute_command(
+        bash,
+        %AST.Until{condition: condition, body: body, redirections: redirs},
+        stdin
+      ) do
+    {redir_stdin, non_stdin_redirs} = Redirection.extract_heredoc_stdin(bash, redirs)
+    effective_stdin = redir_stdin || stdin
+
+    {result, new_bash} =
+      Loop.execute_until(bash, condition, body, effective_stdin, &execute_body/2)
+
+    Redirection.apply_redirections(result, new_bash, non_stdin_redirs)
   end
 
   def execute_command(bash, %AST.Case{word: word, items: items}, _stdin) do

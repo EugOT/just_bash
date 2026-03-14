@@ -395,4 +395,36 @@ defmodule JustBash.Commands.JqTest do
       assert ~s("alice",30) in lines
     end
   end
+
+  describe "jq --arg and --argjson" do
+    test "--arg passes string variable" do
+      bash = bash_with_json(~S|{"name":"alice","age":30}|)
+      cmd = "jq --arg key \"name\" '.[$key]' /data.json"
+      {result, _} = JustBash.exec(bash, cmd)
+      assert result.exit_code == 0
+      assert String.trim(result.stdout) == "\"alice\""
+    end
+
+    test "--argjson passes JSON value" do
+      bash = bash_with_json("[1,2,3,4,5]")
+      cmd = "jq --argjson n 3 'map(select(. > $n))' /data.json"
+      {result, _} = JustBash.exec(bash, cmd)
+      assert result.exit_code == 0
+      parsed = Jason.decode!(result.stdout)
+      assert parsed == [4, 5]
+    end
+
+    test "--arg with multiple variables" do
+      bash = bash_with_json(~S|{"users":[{"name":"alice"},{"name":"bob"}]}|)
+
+      # credo:disable-for-next-line Credo.Check.Readability.StringSigils
+      cmd =
+        "jq --arg field \"name\" --arg val \"bob\" '.users[] | select(.[$field] == $val)' /data.json"
+
+      {result, _} = JustBash.exec(bash, cmd)
+      assert result.exit_code == 0
+      parsed = Jason.decode!(result.stdout)
+      assert parsed == %{"name" => "bob"}
+    end
+  end
 end
