@@ -48,7 +48,20 @@ defmodule JustBash.Eval.Tasks do
       git_log_changelog(),
       json_schema_validator(),
       file_tree_snapshot(),
-      pipeline_etl()
+      pipeline_etl(),
+      # Round 3: uncovered commands, shell depth, realistic scenarios, edge cases
+      set_operations(),
+      column_joiner(),
+      diff_patcher(),
+      numbered_report(),
+      disk_usage_report(),
+      symlink_farm(),
+      date_range_generator(),
+      tee_pipeline(),
+      function_library(),
+      special_char_files(),
+      nested_loop_matrix(),
+      xargs_batch_processor()
     ]
   end
 
@@ -1761,6 +1774,768 @@ defmodule JustBash.Eval.Tasks do
                {:error, "file not found"}
            end
          end}
+      ]
+    }
+  end
+
+  # --- 29. Set operations with comm: compare sorted file lists ---
+
+  defp set_operations do
+    prod =
+      Enum.join(
+        [
+          "api-gateway",
+          "auth-service",
+          "billing-service",
+          "cache-service",
+          "notification-service",
+          "payment-service",
+          "user-service",
+          "web-frontend"
+        ],
+        "\n"
+      ) <> "\n"
+
+    staging =
+      Enum.join(
+        [
+          "api-gateway",
+          "auth-service",
+          "cache-service",
+          "feature-flags",
+          "notification-service",
+          "search-service",
+          "user-service",
+          "web-frontend"
+        ],
+        "\n"
+      ) <> "\n"
+
+    %{
+      name: "set_operations",
+      description: """
+      You have two sorted lists of microservice names:
+      - /data/prod_services.txt — services deployed in production
+      - /data/staging_services.txt — services deployed in staging
+
+      Using `comm` (which compares two sorted files), produce three output files:
+      1. /output/prod_only.txt — services in prod but NOT staging (one per line)
+      2. /output/staging_only.txt — services in staging but NOT prod (one per line)
+      3. /output/both.txt — services in both environments (one per line)
+
+      Also create /output/summary.txt with exactly 3 lines:
+        prod_only: N
+        staging_only: M
+        both: K
+      where N, M, K are the counts.
+
+      Use `comm -23`, `comm -13`, and `comm -12` to compute the three sets.
+      Use `wc -l` to count lines. Do NOT use awk or complex logic — comm does the work.
+      """,
+      files: %{
+        "/data/prod_services.txt" => prod,
+        "/data/staging_services.txt" => staging
+      },
+      validators: [
+        {:command_used, "comm"},
+        {:file_contains, "/output/prod_only.txt",
+         [
+           {:line_count, 2},
+           {:regex, ~r/billing-service/},
+           {:regex, ~r/payment-service/}
+         ]},
+        {:file_contains, "/output/staging_only.txt",
+         [
+           {:line_count, 2},
+           {:regex, ~r/feature-flags/},
+           {:regex, ~r/search-service/}
+         ]},
+        {:file_contains, "/output/both.txt",
+         [
+           {:line_count, 6},
+           {:regex, ~r/api-gateway/},
+           {:regex, ~r/user-service/}
+         ]},
+        {:file_contains, "/output/summary.txt",
+         [
+           {:line_count, 3},
+           {:regex, ~r/prod_only: 2/},
+           {:regex, ~r/staging_only: 2/},
+           {:regex, ~r/both: 6/}
+         ]}
+      ]
+    }
+  end
+
+  # --- 30. Column joiner: merge files side-by-side with paste ---
+
+  defp column_joiner do
+    names =
+      Enum.join(["Alice", "Bob", "Charlie", "Diana", "Eve"], "\n") <> "\n"
+
+    scores =
+      Enum.join(["92", "87", "95", "78", "91"], "\n") <> "\n"
+
+    grades =
+      Enum.join(["A", "B+", "A", "C+", "A-"], "\n") <> "\n"
+
+    %{
+      name: "column_joiner",
+      description: """
+      You have three files with aligned data (same number of lines, one value per line):
+      - /data/names.txt — student names
+      - /data/scores.txt — numeric scores
+      - /data/grades.txt — letter grades
+
+      Use `paste` to combine them into a single file /output/report.csv:
+      1. First use `paste -d,` to join all three files with comma delimiters.
+      2. Prepend a header line "name,score,grade" to the output.
+      3. Also create /output/top_students.txt containing only students with
+         score >= 90, one name per line, sorted alphabetically. Use awk on
+         the CSV to filter by score field.
+      """,
+      files: %{
+        "/data/names.txt" => names,
+        "/data/scores.txt" => scores,
+        "/data/grades.txt" => grades
+      },
+      validators: [
+        {:command_used, "paste"},
+        {:file_contains, "/output/report.csv",
+         [
+           {:line_count, 6},
+           {:regex, ~r/name,score,grade/},
+           {:regex, ~r/Alice,92,A/},
+           {:regex, ~r/Charlie,95,A/}
+         ]},
+        {:file_contains, "/output/top_students.txt",
+         [
+           {:line_count, 3},
+           {:regex, ~r/Alice/},
+           {:regex, ~r/Charlie/},
+           {:regex, ~r/Eve/}
+         ]}
+      ]
+    }
+  end
+
+  # --- 31. Diff patcher: compare files and generate a patch report ---
+
+  defp diff_patcher do
+    original =
+      Enum.join(
+        [
+          "server {",
+          "    listen 80;",
+          "    server_name example.com;",
+          "    root /var/www/html;",
+          "    index index.html;",
+          "    error_log /var/log/nginx/error.log;",
+          "}"
+        ],
+        "\n"
+      ) <> "\n"
+
+    updated =
+      Enum.join(
+        [
+          "server {",
+          "    listen 443 ssl;",
+          "    server_name example.com;",
+          "    root /var/www/html;",
+          "    index index.html index.htm;",
+          "    error_log /var/log/nginx/error.log warn;",
+          "    ssl_certificate /etc/ssl/cert.pem;",
+          "}"
+        ],
+        "\n"
+      ) <> "\n"
+
+    %{
+      name: "diff_patcher",
+      description: """
+      You have two versions of an Nginx config file:
+      - /config/nginx.conf.old — the original
+      - /config/nginx.conf.new — the updated version
+
+      Generate a change report at /output/changes.txt that contains:
+      1. The output of `diff /config/nginx.conf.old /config/nginx.conf.new`
+      2. After a blank line, a summary section with:
+         - "Lines added: N" (count of lines starting with + that are NOT +++)
+         - "Lines removed: M" (count of lines starting with - that are NOT ---)
+
+      Use `diff` (unified format is the default) and `grep -c` to count.
+      """,
+      files: %{
+        "/config/nginx.conf.old" => original,
+        "/config/nginx.conf.new" => updated
+      },
+      validators: [
+        {:command_used, "diff"},
+        {:file_contains, "/output/changes.txt",
+         [
+           {:regex, ~r/listen 443 ssl/},
+           {:regex, ~r/Lines added: \d+/},
+           {:regex, ~r/Lines removed: \d+/}
+         ]}
+      ]
+    }
+  end
+
+  # --- 32. Numbered report: add line numbers with nl ---
+
+  defp numbered_report do
+    code =
+      Enum.join(
+        [
+          "#!/bin/bash",
+          "",
+          "# Configuration",
+          "APP_NAME=\"myapp\"",
+          "APP_PORT=3000",
+          "",
+          "# Functions",
+          "start_server() {",
+          "    echo \"Starting $APP_NAME on port $APP_PORT\"",
+          "    echo \"Server running...\"",
+          "}",
+          "",
+          "stop_server() {",
+          "    echo \"Stopping $APP_NAME\"",
+          "}",
+          "",
+          "# Main",
+          "start_server"
+        ],
+        "\n"
+      ) <> "\n"
+
+    %{
+      name: "numbered_report",
+      description: """
+      You have a bash script at /src/server.sh.
+
+      Generate a code review report at /output/review.txt that contains:
+      1. A header line: "Code Review: server.sh"
+      2. A blank line
+      3. The full script with line numbers added by `nl` (using `nl -ba` to number
+         ALL lines including blank ones).
+      4. A blank line
+      5. A summary section:
+         - "Total lines: N" (use `wc -l`)
+         - "Comment lines: M" (lines starting with #, use `grep -c`)
+         - "Blank lines: K" (empty lines, use `grep -c`)
+         - "Code lines: J" (total - comments - blank)
+      """,
+      files: %{"/src/server.sh" => code},
+      validators: [
+        {:command_used, "nl"},
+        {:file_contains, "/output/review.txt",
+         [
+           {:regex, ~r/Code Review: server\.sh/},
+           {:regex, ~r/Total lines: 18/},
+           {:regex, ~r/Comment lines: 4/},
+           {:regex, ~r/Blank lines: 4/},
+           {:regex, ~r/Code lines: 10/}
+         ]}
+      ]
+    }
+  end
+
+  # --- 33. Disk usage report: analyze directory sizes with du and stat ---
+
+  defp disk_usage_report do
+    %{
+      name: "disk_usage_report",
+      description: """
+      You have a project directory /project/ with several files and subdirectories.
+      Generate a disk usage report at /output/usage.txt.
+
+      The report should contain:
+      1. A header: "Disk Usage Report"
+      2. A blank line
+      3. For each file (found with `find /project -type f`), a line showing:
+         filename<TAB>size_in_bytes
+         where size_in_bytes comes from `wc -c < file` (one file at a time).
+         Sort these lines by size descending (largest first) using `sort -t$'\\t' -k2,2nr`.
+      4. A blank line
+      5. "Total files: N"
+      6. "Total bytes: B"
+      7. "Largest file: FILENAME (SIZE bytes)"
+
+      Do NOT use `stat` — use `wc -c < file` for sizes and `basename` for filenames.
+      Process files one at a time with a while-read loop.
+      """,
+      files: %{
+        "/project/README.md" => "# Project\n\nA description of the project with some content.\n",
+        "/project/src/main.py" =>
+          "import sys\n\ndef main():\n    print('Hello')\n\nif __name__ == '__main__':\n    main()\n",
+        "/project/src/utils.py" => "def helper():\n    pass\n",
+        "/project/tests/test_main.py" =>
+          "import unittest\n\nclass TestMain(unittest.TestCase):\n    def test_hello(self):\n        self.assertTrue(True)\n",
+        "/project/config.json" => "{\"debug\": true, \"port\": 8080}\n"
+      },
+      validators: [
+        {:file_contains, "/output/usage.txt",
+         [
+           {:regex, ~r/Disk Usage Report/},
+           {:regex, ~r/Total files: 5/},
+           {:regex, ~r/Total bytes: \d+/},
+           {:regex, ~r/Largest file:/}
+         ]},
+        {:custom, "largest_file_check",
+         fn %{bash: bash} ->
+           case JustBash.Fs.InMemoryFs.read_file(bash.fs, "/output/usage.txt") do
+             {:ok, content} ->
+               # test_main.py is the largest file
+               if String.contains?(content, "test_main.py"),
+                 do: :ok,
+                 else: {:error, "expected test_main.py to appear as it's the largest file"}
+
+             {:error, _} ->
+               {:error, "file not found"}
+           end
+         end}
+      ]
+    }
+  end
+
+  # --- 34. Symlink farm: create organized symlinks ---
+
+  defp symlink_farm do
+    %{
+      name: "symlink_farm",
+      description: """
+      You have config files scattered across /etc/services/:
+      - /etc/services/web/nginx.conf
+      - /etc/services/web/apache.conf
+      - /etc/services/db/postgres.conf
+      - /etc/services/db/redis.conf
+      - /etc/services/cache/memcached.conf
+
+      Create a symlink farm at /links/ where each config is accessible by a
+      flat name: /links/nginx.conf -> /etc/services/web/nginx.conf, etc.
+
+      Use `ln -s` to create the links and `find /etc/services -type f` to
+      discover files. Then write /output/link_map.txt with one line per link:
+        symlink_name -> target_path
+      sorted alphabetically by symlink name.
+
+      Verify each symlink works by reading through it with `cat`.
+      """,
+      files: %{
+        "/etc/services/web/nginx.conf" => "worker_processes auto;\n",
+        "/etc/services/web/apache.conf" => "ServerRoot \"/etc/httpd\"\n",
+        "/etc/services/db/postgres.conf" => "max_connections = 100\n",
+        "/etc/services/db/redis.conf" => "bind 127.0.0.1\n",
+        "/etc/services/cache/memcached.conf" => "maxconn 1024\n"
+      },
+      validators: [
+        {:command_used, "ln"},
+        {:file_contains, "/output/link_map.txt",
+         [
+           {:line_count, 5},
+           {:regex, ~r/nginx\.conf.*->/},
+           {:regex, ~r/redis\.conf.*->/}
+         ]},
+        {:custom, "symlinks_work",
+         fn %{bash: bash} ->
+           case JustBash.Fs.InMemoryFs.read_file(bash.fs, "/links/nginx.conf") do
+             {:ok, content} ->
+               if String.contains?(content, "worker_processes"),
+                 do: :ok,
+                 else: {:error, "symlink /links/nginx.conf doesn't resolve correctly"}
+
+             {:error, _} ->
+               {:error, "/links/nginx.conf not found"}
+           end
+         end}
+      ]
+    }
+  end
+
+  # --- 35. Date range generator: generate date-based file structure ---
+
+  defp date_range_generator do
+    %{
+      name: "date_range_generator",
+      description: """
+      Generate a log directory structure for the first 7 days of January 2024.
+
+      For each day (2024-01-01 through 2024-01-07), create:
+      - /logs/2024-01-DD/access.log containing "Access log for 2024-01-DD"
+      - /logs/2024-01-DD/error.log containing "Error log for 2024-01-DD"
+
+      Use a counter variable and a while loop (or for loop with seq 1 7).
+      Use `printf` to zero-pad the day number.
+
+      Then create /output/index.txt listing all the directories created, one per
+      line, sorted. Example: "2024-01-01" on the first line.
+
+      Also write /output/stats.txt with:
+        directories: 7
+        files: 14
+        total_size: N
+      where N is the sum of all file sizes (use `wc -c` one file at a time
+      in a while-read loop over `find /logs -type f`).
+      """,
+      files: %{},
+      validators: [
+        {:file_contains, "/output/index.txt",
+         [
+           {:line_count, 7},
+           {:regex, ~r/2024-01-01/},
+           {:regex, ~r/2024-01-07/}
+         ]},
+        {:file_contains, "/output/stats.txt",
+         [
+           {:regex, ~r/directories: 7/},
+           {:regex, ~r/files: 14/},
+           {:regex, ~r/total_size: \d+/}
+         ]},
+        {:custom, "day3_access_log",
+         fn %{bash: bash} ->
+           case JustBash.Fs.InMemoryFs.read_file(bash.fs, "/logs/2024-01-03/access.log") do
+             {:ok, content} ->
+               if String.contains?(content, "2024-01-03"),
+                 do: :ok,
+                 else: {:error, "access.log for day 3 doesn't contain correct date"}
+
+             {:error, _} ->
+               {:error, "/logs/2024-01-03/access.log not found"}
+           end
+         end}
+      ]
+    }
+  end
+
+  # --- 36. Tee pipeline: split output to multiple destinations ---
+
+  defp tee_pipeline do
+    log =
+      Enum.join(
+        [
+          "2024-01-01 10:00:00 INFO Starting application",
+          "2024-01-01 10:00:01 DEBUG Loading config from /etc/app.conf",
+          "2024-01-01 10:00:02 INFO Server listening on port 8080",
+          "2024-01-01 10:00:05 WARN High memory usage: 85%",
+          "2024-01-01 10:00:10 ERROR Connection to database failed",
+          "2024-01-01 10:00:11 INFO Retrying database connection",
+          "2024-01-01 10:00:15 ERROR Timeout waiting for database",
+          "2024-01-01 10:00:20 DEBUG Cleanup routine started",
+          "2024-01-01 10:00:25 WARN Disk usage above 90%",
+          "2024-01-01 10:00:30 INFO Application shutdown requested"
+        ],
+        "\n"
+      ) <> "\n"
+
+    %{
+      name: "tee_pipeline",
+      description: """
+      You have an application log at /var/log/app.log with timestamped entries
+      at different log levels (INFO, DEBUG, WARN, ERROR).
+
+      Create a log routing pipeline that splits the log into separate files by
+      severity level. Use `tee` to write to files while continuing the pipeline.
+
+      Produce:
+      1. /output/errors.log — only ERROR lines
+      2. /output/warnings.log — only WARN lines
+      3. /output/info.log — only INFO lines
+      4. /output/debug.log — only DEBUG lines
+      5. /output/important.log — both ERROR and WARN lines combined, sorted by timestamp
+
+      For items 1-4, use `grep LEVEL /var/log/app.log > /output/file.log`.
+      For item 5, `grep` for ERROR and WARN lines and use `sort` to order them.
+      Also use `tee` at least once in the pipeline (e.g., to write both the
+      errors file and pipe to wc for counting).
+
+      Finally, create /output/summary.txt with:
+        total: N
+        info: I
+        debug: D
+        warn: W
+        error: E
+      """,
+      files: %{"/var/log/app.log" => log},
+      validators: [
+        {:command_used, "tee"},
+        {:file_contains, "/output/errors.log",
+         [
+           {:line_count, 2},
+           {:regex, ~r/ERROR/}
+         ]},
+        {:file_contains, "/output/warnings.log",
+         [
+           {:line_count, 2},
+           {:regex, ~r/WARN/}
+         ]},
+        {:file_contains, "/output/important.log",
+         [
+           {:line_count, 4},
+           {:regex, ~r/ERROR/},
+           {:regex, ~r/WARN/}
+         ]},
+        {:file_contains, "/output/summary.txt",
+         [
+           {:regex, ~r/total: 10/},
+           {:regex, ~r/error: 2/},
+           {:regex, ~r/warn: 2/}
+         ]}
+      ]
+    }
+  end
+
+  # --- 37. Function library: shell functions and case statements ---
+
+  defp function_library do
+    data =
+      Enum.join(
+        [
+          "photo_001.jpg 2048000",
+          "document.pdf 524288",
+          "song.mp3 4194304",
+          "video.mp4 104857600",
+          "notes.txt 1024",
+          "archive.tar.gz 10485760",
+          "script.sh 512",
+          "image.png 8388608",
+          "readme.md 2048",
+          "backup.zip 52428800"
+        ],
+        "\n"
+      ) <> "\n"
+
+    %{
+      name: "function_library",
+      description: """
+      You have a file at /data/files.txt with one entry per line:
+        filename size_in_bytes
+
+      Write a single script that defines and uses shell functions to:
+      1. `classify_file` — takes a filename and prints its category based on extension:
+         - jpg, jpeg, png, gif, bmp -> "image"
+         - mp3, wav, flac, ogg -> "audio"
+         - mp4, avi, mkv, mov -> "video"
+         - pdf, doc, docx, odt -> "document"
+         - tar.gz, zip, rar, 7z -> "archive"
+         - Everything else -> "other"
+         Use a `case` statement with glob patterns.
+
+      2. `format_size` — takes bytes and prints a human-readable size:
+         - >= 1048576 (1MB): print as "X.XMB" (use integer arithmetic: MB = bytes/1048576)
+         - >= 1024: print as "X.XKB" (KB = bytes/1024)
+         - Otherwise: print as "NB"
+
+      Process each line of /data/files.txt and produce /output/catalog.txt with:
+        filename | category | human_size
+      one per line, sorted by category then filename.
+
+      Also produce /output/category_summary.txt with:
+        category: count
+      sorted by category name.
+
+      IMPORTANT: All logic MUST go in a single tool call since functions
+      don't persist between calls. Use `while read` to process the file.
+      """,
+      files: %{"/data/files.txt" => data},
+      validators: [
+        {:file_contains, "/output/catalog.txt",
+         [
+           {:line_count, 10},
+           {:regex, ~r/photo_001\.jpg.*image/},
+           {:regex, ~r/video\.mp4.*video/},
+           {:regex, ~r/notes\.txt.*other/},
+           {:regex, ~r/archive\.tar\.gz.*archive/}
+         ]},
+        {:file_contains, "/output/category_summary.txt",
+         [
+           {:regex, ~r/image: 2/},
+           {:regex, ~r/archive: 2/},
+           {:regex, ~r/video: 1/}
+         ]}
+      ]
+    }
+  end
+
+  # --- 38. Special character filenames: handle edge cases ---
+
+  defp special_char_files do
+    %{
+      name: "special_char_files",
+      description: """
+      You have files with tricky names under /data/:
+      - /data/file with spaces.txt — content "spaces work"
+      - /data/file-with-dashes.txt — content "dashes work"
+      - /data/file_with_underscores.txt — content "underscores work"
+      - /data/FILE.UPPER.txt — content "upper works"
+      - /data/MiXeD.CaSe.txt — content "mixed works"
+
+      Tasks:
+      1. Create /output/inventory.txt listing all filenames (basenames only),
+         one per line, sorted alphabetically. Use `find /data -type f | sort`
+         piped into a while-read loop with `basename`.
+
+      2. Create /output/lowered/ directory and copy each file there with its
+         filename converted to all lowercase. Use `tr '[:upper:]' '[:lower:]'`
+         to transform the filename. Use a while-read loop over find output.
+
+      3. Create /output/checksums.txt with `sha256sum`-style output for each
+         original file, sorted by filename. Format: "hash  filename" per line.
+
+      IMPORTANT: Always quote variables containing filenames ("$file") to handle spaces.
+      Use `find ... | while IFS= read -r file` to iterate safely.
+      """,
+      files: %{
+        "/data/file with spaces.txt" => "spaces work",
+        "/data/file-with-dashes.txt" => "dashes work",
+        "/data/file_with_underscores.txt" => "underscores work",
+        "/data/FILE.UPPER.txt" => "upper works",
+        "/data/MiXeD.CaSe.txt" => "mixed works"
+      },
+      validators: [
+        {:file_contains, "/output/inventory.txt",
+         [
+           {:line_count, 5},
+           {:regex, ~r/file with spaces\.txt/},
+           {:regex, ~r/FILE\.UPPER\.txt/}
+         ]},
+        {:custom, "lowercase_files",
+         fn %{bash: bash} ->
+           case JustBash.Fs.InMemoryFs.read_file(bash.fs, "/output/lowered/file.upper.txt") do
+             {:ok, content} ->
+               if content == "upper works",
+                 do: :ok,
+                 else: {:error, "lowered file has wrong content: #{inspect(content)}"}
+
+             {:error, _} ->
+               {:error, "/output/lowered/file.upper.txt not found"}
+           end
+         end},
+        {:file_contains, "/output/checksums.txt",
+         [
+           {:line_count, 5},
+           {:regex, ~r/[a-f0-9]{64}/}
+         ]}
+      ]
+    }
+  end
+
+  # --- 39. Nested loop matrix: generate a multiplication table ---
+
+  defp nested_loop_matrix do
+    %{
+      name: "nested_loop_matrix",
+      description: """
+      Generate a formatted multiplication table for 1 through 8 and write it
+      to /output/table.txt.
+
+      The table should have:
+      1. A header row with column numbers: "  x |  1   2   3   4   5   6   7   8"
+      2. A separator line of dashes: "----+----------------------------------------" (or similar)
+      3. One row per multiplier (1-8), formatted as:
+         "  N | R1  R2  R3  R4  R5  R6  R7  R8"
+         where each result is right-aligned to 3 characters width.
+
+      Use nested for loops (or a while loop with seq) and `printf` for formatting.
+      Use `printf "%3d"` to right-align numbers to 3 characters.
+
+      Also create /output/diagonal.txt containing just the diagonal values
+      (1*1, 2*2, 3*3, ... 8*8), one per line: 1, 4, 9, 16, 25, 36, 49, 64.
+      """,
+      files: %{},
+      validators: [
+        {:file_contains, "/output/table.txt",
+         [
+           {:regex, ~r/\d.*\|.*1.*2.*3.*4.*5.*6.*7.*8/},
+           {:regex, ~r/3.*\|.*3.*6.*9.*12.*15.*18.*21.*24/}
+         ]},
+        {:file_contains, "/output/diagonal.txt",
+         [
+           {:line_count, 8},
+           {:regex, ~r/^1$/m},
+           {:regex, ~r/^4$/m},
+           {:regex, ~r/^9$/m},
+           {:regex, ~r/^64$/m}
+         ]}
+      ]
+    }
+  end
+
+  # --- 40. Xargs batch processor: parallel-style processing ---
+
+  defp xargs_batch_processor do
+    urls =
+      Enum.join(
+        [
+          "/api/users",
+          "/api/products",
+          "/api/orders",
+          "/api/categories",
+          "/api/reviews",
+          "/api/inventory",
+          "/api/payments",
+          "/api/shipping"
+        ],
+        "\n"
+      ) <> "\n"
+
+    %{
+      name: "xargs_batch_processor",
+      description: """
+      You have a file /data/endpoints.txt with API endpoint paths, one per line.
+
+      Use `xargs` to batch-process these endpoints:
+
+      1. Use `cat /data/endpoints.txt | xargs -I{} echo "GET {}"` to generate
+         a list of HTTP-style request lines. Write to /output/requests.txt.
+
+      2. Create a /output/report.json using jq. The JSON should be an object with:
+         - "total_endpoints": count of endpoints
+         - "endpoints": array of objects, each with "path" and "method" keys
+           Example: {"path": "/api/users", "method": "GET"}
+         Sort the endpoints array by path.
+
+      3. Create /output/by_resource.txt grouping endpoints by their resource
+         (the part after /api/). Format:
+           resource: endpoint_count
+         sorted alphabetically. Use awk or cut to extract the resource name
+         and `sort | uniq -c` to count.
+      """,
+      files: %{"/data/endpoints.txt" => urls},
+      validators: [
+        {:command_used, "xargs"},
+        {:file_contains, "/output/requests.txt",
+         [
+           {:line_count, 8},
+           {:regex, ~r/GET \/api\/users/},
+           {:regex, ~r/GET \/api\/products/}
+         ]},
+        {:file_contains, "/output/report.json",
+         [
+           {:json,
+            fn data ->
+              cond do
+                data["total_endpoints"] != 8 ->
+                  {:error, "expected total_endpoints=8, got #{inspect(data["total_endpoints"])}"}
+
+                not is_list(data["endpoints"]) ->
+                  {:error, "endpoints should be an array"}
+
+                length(data["endpoints"]) != 8 ->
+                  {:error, "expected 8 endpoints, got #{length(data["endpoints"])}"}
+
+                true ->
+                  :ok
+              end
+            end}
+         ]},
+        {:file_contains, "/output/by_resource.txt",
+         [
+           {:line_count, 8},
+           {:regex, ~r/users/},
+           {:regex, ~r/products/}
+         ]}
       ]
     }
   end
