@@ -27,21 +27,12 @@ defmodule JustBash.Commands.CurlTest do
            }}
 
         String.contains?(url, "/redirect") ->
-          if req.follow_redirects do
-            {:ok,
-             %{
-               status: 200,
-               headers: [{"content-type", "application/json"}],
-               body: ~s({"url": "https://httpbin.org/get", "redirected": true})
-             }}
-          else
-            {:ok,
-             %{
-               status: 302,
-               headers: [{"location", "https://httpbin.org/get"}],
-               body: ""
-             }}
-          end
+          {:ok,
+           %{
+             status: 302,
+             headers: %{"location" => ["https://httpbin.org/get"]},
+             body: ""
+           }}
 
         true ->
           {:ok,
@@ -63,7 +54,9 @@ defmodule JustBash.Commands.CurlTest do
     end
 
     test "curl with network enabled can make requests" do
-      bash = JustBash.new(network: %{enabled: true}, http_client: MockHttpClient)
+      bash =
+        JustBash.new(network: %{enabled: true, allow_list: :all}, http_client: MockHttpClient)
+
       {result, _} = JustBash.exec(bash, "curl -s https://httpbin.org/get")
       assert result.exit_code == 0
       assert result.stdout =~ "httpbin.org"
@@ -96,21 +89,25 @@ defmodule JustBash.Commands.CurlTest do
     end
 
     test "curl without URL returns error" do
-      bash = JustBash.new(network: %{enabled: true})
+      bash = JustBash.new(network: %{enabled: true, allow_list: :all})
       {result, _} = JustBash.exec(bash, "curl")
       assert result.exit_code == 1
       assert result.stderr =~ "no URL"
     end
 
     test "curl -I shows headers only" do
-      bash = JustBash.new(network: %{enabled: true}, http_client: MockHttpClient)
+      bash =
+        JustBash.new(network: %{enabled: true, allow_list: :all}, http_client: MockHttpClient)
+
       {result, _} = JustBash.exec(bash, "curl -s -I https://httpbin.org/get")
       assert result.exit_code == 0
       assert result.stdout =~ "HTTP/"
     end
 
     test "curl -o writes to file" do
-      bash = JustBash.new(network: %{enabled: true}, http_client: MockHttpClient)
+      bash =
+        JustBash.new(network: %{enabled: true, allow_list: :all}, http_client: MockHttpClient)
+
       {result, new_bash} = JustBash.exec(bash, "curl -s -o /tmp/out.txt https://httpbin.org/get")
       assert result.exit_code == 0
 
@@ -119,7 +116,8 @@ defmodule JustBash.Commands.CurlTest do
     end
 
     test "curl POST with data" do
-      bash = JustBash.new(network: %{enabled: true}, http_client: MockHttpClient)
+      bash =
+        JustBash.new(network: %{enabled: true, allow_list: :all}, http_client: MockHttpClient)
 
       {result, _} =
         JustBash.exec(
@@ -132,7 +130,9 @@ defmodule JustBash.Commands.CurlTest do
     end
 
     test "curl follows redirects with -L" do
-      bash = JustBash.new(network: %{enabled: true}, http_client: MockHttpClient)
+      bash =
+        JustBash.new(network: %{enabled: true, allow_list: :all}, http_client: MockHttpClient)
+
       {result, _} = JustBash.exec(bash, "curl -s -L https://httpbin.org/redirect/1")
       assert result.exit_code == 0
       assert result.stdout =~ "url"

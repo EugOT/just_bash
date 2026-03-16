@@ -34,12 +34,17 @@ defmodule JustBash.Integration.CurlJqTest do
 
   defp bash_with_responses(responses) do
     Process.put(:http_responses, responses)
-    JustBash.new(network: %{enabled: true}, http_client: TestHttpClient)
+    JustBash.new(network: %{enabled: true, allow_list: :all}, http_client: TestHttpClient)
   end
 
   defp bash_with_responses_and_files(responses, files) do
     Process.put(:http_responses, responses)
-    JustBash.new(network: %{enabled: true}, http_client: TestHttpClient, files: files)
+
+    JustBash.new(
+      network: %{enabled: true, allow_list: :all},
+      http_client: TestHttpClient,
+      files: files
+    )
   end
 
   describe "curl | jq basic pipelines" do

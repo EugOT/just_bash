@@ -15,6 +15,7 @@ defmodule JustBash.Commands.Wget do
 
   alias JustBash.Commands.Command
   alias JustBash.Fs.InMemoryFs
+  alias JustBash.Network
 
   @impl true
   def names, do: ["wget"]
@@ -33,7 +34,7 @@ defmodule JustBash.Commands.Wget do
       true ->
         url = List.first(urls)
 
-        case validate_network_access(bash, url) do
+        case Network.validate_access(bash, url, "wget") do
           :ok -> perform_request(bash, url, %{opts | url: url})
           {:error, msg} -> {Command.error(msg), bash}
         end
@@ -74,41 +75,6 @@ defmodule JustBash.Commands.Wget do
   defp parse_args([url | rest], opts, urls),
     do: parse_args(rest, opts, [url | urls])
 
-  defp validate_network_access(bash, url) do
-    network_config = Map.get(bash, :network, %{})
-    enabled = Map.get(network_config, :enabled, false)
-    allow_list = Map.get(network_config, :allow_list, [])
-
-    cond do
-      not enabled ->
-        {:error, "wget: network access is disabled\n"}
-
-      allow_list == [] ->
-        :ok
-
-      url_allowed?(url, allow_list) ->
-        :ok
-
-      true ->
-        {:error, "wget: access to #{url} is not allowed\n"}
-    end
-  end
-
-  defp url_allowed?(url, allow_list) do
-    uri = URI.parse(url)
-    host = uri.host || ""
-
-    Enum.any?(allow_list, fn pattern ->
-      case pattern do
-        "*" -> true
-        "**" -> true
-        "*." <> domain -> String.ends_with?(host, "." <> domain) or host == domain
-        ^host -> true
-        _ -> false
-      end
-    end)
-  end
-
   defp perform_request(bash, url, opts) do
     client = bash.http_client || JustBash.HttpClient.Default
 
@@ -118,13 +84,18 @@ defmodule JustBash.Commands.Wget do
       headers: %{},
       body: nil,
       timeout: 30_000,
-      follow_redirects: true,
+      follow_redirects: false,
       insecure: false
     }
 
-    case client.request(request) do
-      {:ok, response} ->
+    # wget always follows redirects and only issues GET requests,
+    # so the default on_redirect (identity) is correct.
+    case Network.follow_redirects(bash, request, "wget", &client.request/1) do
+      {:response, response} ->
         handle_response(bash, response, opts)
+
+      {:error, %{reason: msg}} when is_binary(msg) ->
+        {Command.error(msg), bash}
 
       {:error, %{reason: reason}} ->
         {Command.error("wget: failed to connect: #{inspect(reason)}\n"), bash}
@@ -142,7 +113,7 @@ defmodule JustBash.Commands.Wget do
 
   defp handle_response(bash, response, %{output: nil, url: url} = opts) do
     # Default: derive filename from URL or use index.html
-    uri = URI.parse(url || "")
+    uri = URI.parse(url)
     filename = Path.basename(uri.path || "index.html")
     filename = if filename == "", do: "index.html", else: filename
     write_to_file(bash, response, filename, opts)

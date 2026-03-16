@@ -19,6 +19,7 @@ defmodule JustBash.Commands.Curl do
   alias JustBash.Commands.ArgParser
   alias JustBash.Commands.Command
   alias JustBash.Fs.InMemoryFs
+  alias JustBash.Network
 
   @default_timeout 30_000
 
@@ -42,7 +43,7 @@ defmodule JustBash.Commands.Curl do
             {Command.error("curl: no URL specified\n"), bash}
 
           true ->
-            case validate_network_access(bash, opts.url) do
+            case Network.validate_access(bash, opts.url, "curl") do
               :ok -> perform_request(bash, opts)
               {:error, msg} -> {Command.error(msg), bash}
             end
@@ -125,52 +126,12 @@ defmodule JustBash.Commands.Curl do
       include_headers: [short: "-i", long: "--include", type: :boolean],
       head_only: [short: "-I", long: "--head", type: :boolean],
       follow_redirects: [short: "-L", long: "--location", type: :boolean],
-      insecure: [short: "-k", long: "--insecure", type: :boolean],
       user: [short: "-u", long: "--user", type: :string],
       user_agent: [short: "-A", long: "--user-agent", type: :string],
       timeout: [short: "-m", long: "--max-time", type: :integer, default: @default_timeout],
       connect_timeout: [long: "--connect-timeout", type: :integer]
     ]
   end
-
-  defp validate_network_access(bash, url) do
-    network_config = Map.get(bash, :network, %{})
-    enabled = Map.get(network_config, :enabled, false)
-    allow_list = Map.get(network_config, :allow_list, [])
-
-    cond do
-      not enabled ->
-        {:error, "curl: network access is disabled\n"}
-
-      allow_list == [] ->
-        :ok
-
-      url_allowed?(url, allow_list) ->
-        :ok
-
-      true ->
-        {:error, "curl: access to #{url} is not allowed\n"}
-    end
-  end
-
-  defp url_allowed?(url, allow_list) do
-    uri = URI.parse(url)
-    host = uri.host || ""
-
-    Enum.any?(allow_list, fn pattern ->
-      pattern_matches?(pattern, host)
-    end)
-  end
-
-  defp pattern_matches?("*", _host), do: true
-  defp pattern_matches?("**", _host), do: true
-
-  defp pattern_matches?("*." <> domain, host) do
-    suffix = "." <> domain
-    String.ends_with?(host, suffix) or host == domain
-  end
-
-  defp pattern_matches?(pattern, host), do: host == pattern
 
   defp perform_request(bash, opts) do
     client = bash.http_client || JustBash.HttpClient.Default
@@ -181,19 +142,34 @@ defmodule JustBash.Commands.Curl do
       headers: build_headers(opts),
       body: opts.data,
       timeout: opts.timeout,
-      follow_redirects: opts.follow_redirects,
-      insecure: opts.insecure
+      # Always disable library-level redirect following — we handle it
+      # manually so every redirect target is checked against the allow_list.
+      follow_redirects: false,
+      insecure: false
     }
 
-    case client.request(request) do
-      {:ok, response} ->
+    request_fn = &client.request/1
+
+    on_redirect = fn status, req ->
+      %{req | method: redirect_method(status, req.method)}
+    end
+
+    case Network.follow_redirects(bash, request, "curl", request_fn, on_redirect) do
+      {:response, response} ->
         handle_response(bash, response, opts)
 
+      {:error, %{reason: msg}} when is_binary(msg) ->
+        {Command.error(msg), bash}
+
       {:error, %{reason: reason}} ->
-        msg = format_transport_error(reason)
-        {Command.error("curl: #{msg}\n"), bash}
+        {Command.error("curl: #{format_transport_error(reason)}\n"), bash}
     end
   end
+
+  # 303 always becomes GET; 307/308 preserve method; 301/302 conventionally become GET
+  defp redirect_method(303, _), do: :get
+  defp redirect_method(status, method) when status in [307, 308], do: method
+  defp redirect_method(_, _), do: :get
 
   defp build_headers(opts) do
     headers = opts.headers
@@ -306,7 +282,6 @@ defmodule JustBash.Commands.Curl do
       -i, --include          Include response headers in output
       -I, --head             Show headers only (HEAD request)
       -L, --location         Follow redirects
-      -k, --insecure         Allow insecure connections
       -u, --user USER:PASS   Basic authentication
       -A, --user-agent STR   Set User-Agent header
       -m, --max-time SECS    Maximum time for request
@@ -314,7 +289,7 @@ defmodule JustBash.Commands.Curl do
       -h, --help             Show this help
 
     Network access must be enabled when creating the bash environment:
-      JustBash.new(network: %{enabled: true})
+      JustBash.new(network: %{enabled: true, allow_list: :all})
 
     To restrict access to specific hosts:
       JustBash.new(network: %{enabled: true, allow_list: ["api.example.com", "*.github.com"]})

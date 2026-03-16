@@ -1406,28 +1406,31 @@ defmodule JustBash.Commands.Jq.Parser do
     parse_postfix(parse_primary(input))
   end
 
-  # Known jq format names — ensure these atoms exist for safe_to_atom
-  @known_formats ~w(csv tsv json text base64 base64d uri urid sh html)a
+  # Map from format name strings to atoms.  Using an explicit map guarantees the
+  # atoms exist in the runtime atom table — String.to_existing_atom/1 is unreliable
+  # because compile-time module attributes don't always populate the runtime table.
+  @format_atoms Map.new(
+                  ~w(csv tsv json text base64 base64d uri urid sh html),
+                  &{&1, String.to_atom(&1)}
+                )
 
   defp parse_format_string(input) do
-    # Reference @known_formats to ensure atoms are compiled
-    _ = @known_formats
-
     case parse_identifier(input) do
       {"", _} ->
         throw({:parse_error, "expected format name after @"})
 
       {name, rest} ->
+        format_atom = Map.get(@format_atoms, name, name)
         rest = String.trim(rest)
 
         # Check for @format "string interpolation"
         case rest do
           "\"" <> _ ->
             {str_ast, rest2} = parse_string_literal(rest)
-            {{:format_str, safe_to_atom(name), str_ast}, rest2}
+            {{:format_str, format_atom, str_ast}, rest2}
 
           _ ->
-            {{:format, safe_to_atom(name)}, rest}
+            {{:format, format_atom}, rest}
         end
     end
   end

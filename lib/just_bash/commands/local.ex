@@ -33,40 +33,38 @@ defmodule JustBash.Commands.Local do
   end
 
   defp process_arg(arg, bash, is_assoc) do
-    # Handle assignment syntax: name=value
     case String.split(arg, "=", parts: 2) do
       [name, value] when name != "" ->
-        env =
-          bash.env
-          |> Map.put(name, value)
-          |> track_local(name)
-          |> maybe_mark_assoc(name, is_assoc)
-
-        %{bash | env: env}
+        bash
+        |> put_env(name, value)
+        |> track_local(name)
+        |> maybe_mark_assoc(name, is_assoc)
 
       [name] when name != "" ->
-        env =
-          bash.env
-          |> Map.put(name, "")
-          |> track_local(name)
-          |> maybe_mark_assoc(name, is_assoc)
-
-        %{bash | env: env}
+        bash
+        |> put_env(name, "")
+        |> track_local(name)
+        |> maybe_mark_assoc(name, is_assoc)
 
       _ ->
         bash
     end
   end
 
-  defp maybe_mark_assoc(env, name, true), do: Map.put(env, "__assoc__#{name}", "1")
-  defp maybe_mark_assoc(env, _name, false), do: env
+  defp put_env(bash, name, value), do: %{bash | env: Map.put(bash.env, name, value)}
 
-  # Register a variable name as local so execute_function can revert it
-  defp track_local(env, name) do
-    case Map.get(env, "__locals__") do
-      %MapSet{} = locals -> Map.put(env, "__locals__", MapSet.put(locals, name))
-      # Not inside a function — local has no effect on scoping
-      _ -> env
-    end
+  defp maybe_mark_assoc(bash, name, true) do
+    new_assoc = MapSet.put(bash.interpreter.assoc_arrays, name)
+    %{bash | interpreter: %{bash.interpreter | assoc_arrays: new_assoc}}
+  end
+
+  defp maybe_mark_assoc(bash, _name, false), do: bash
+
+  # Register a variable name as local so execute_function can revert it on return.
+  # Only has effect when inside a function call (locals tracker is a MapSet).
+  # Outside a function, local/declare still sets the variable but doesn't track it.
+  defp track_local(bash, name) do
+    new_locals = MapSet.put(bash.interpreter.locals, name)
+    %{bash | interpreter: %{bash.interpreter | locals: new_locals}}
   end
 end

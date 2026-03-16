@@ -150,4 +150,20 @@ defmodule JustBashTest do
       assert result.stderr =~ "syntax error"
     end
   end
+
+  describe "exec_file/2" do
+    test "reads script from the virtual filesystem, not the real one" do
+      bash = JustBash.new(files: %{"/script.sh" => "echo hello from virtual fs\n"})
+      {result, _bash} = JustBash.exec_file(bash, "/script.sh")
+      assert result.exit_code == 0
+      assert result.stdout == "hello from virtual fs\n"
+    end
+
+    test "returns error when script does not exist in virtual filesystem" do
+      bash = JustBash.new()
+      {result, _bash} = JustBash.exec_file(bash, "/nonexistent.sh")
+      assert result.exit_code == 1
+      assert result.stderr =~ "nonexistent.sh"
+    end
+  end
 end

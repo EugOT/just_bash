@@ -138,7 +138,7 @@ defmodule JustBash.Interpreter.Expansion.Parameter do
   end
 
   defp associative_array?(bash, arr_name) do
-    Map.has_key?(bash.env, "__assoc__#{arr_name}")
+    MapSet.member?(bash.interpreter.assoc_arrays, arr_name)
   end
 
   # Expand $var and ${var} references within array subscript strings,

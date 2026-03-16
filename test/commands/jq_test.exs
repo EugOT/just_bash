@@ -477,4 +477,36 @@ defmodule JustBash.Commands.JqTest do
       assert result.exit_code == 1
     end
   end
+
+  describe "jq import/include from virtual filesystem" do
+    test "include reads .jq module file from virtual filesystem" do
+      bash =
+        JustBash.new(
+          files: %{
+            "/lib/utils.jq" => "def double: . * 2;",
+            "/data.json" => "[1, 2, 3]"
+          },
+          jq_module_paths: ["/lib"]
+        )
+
+      {result, _} = JustBash.exec(bash, ~S[jq -c 'include "utils"; map(double)' /data.json])
+      assert result.exit_code == 0
+      assert String.trim(result.stdout) == "[2,4,6]"
+    end
+
+    test "import reads .jq module file from virtual filesystem" do
+      bash =
+        JustBash.new(
+          files: %{
+            "/lib/math.jq" => "def triple: . * 3;",
+            "/data.json" => "4"
+          },
+          jq_module_paths: ["/lib"]
+        )
+
+      {result, _} = JustBash.exec(bash, ~S[jq 'import "math" as m; m::triple' /data.json])
+      assert result.exit_code == 0
+      assert String.trim(result.stdout) == "12"
+    end
+  end
 end
