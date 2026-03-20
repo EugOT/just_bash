@@ -12,7 +12,7 @@ defmodule JustBash.Interpreter.Executor.Loop do
   alias JustBash.Interpreter.Expansion
   alias JustBash.Result
 
-  @max_iterations 1000
+  @default_max_iterations 10_000
 
   @type result :: %{
           stdout: String.t(),
@@ -50,7 +50,7 @@ defmodule JustBash.Interpreter.Executor.Loop do
   def execute_while(bash, condition, body, stdin, execute_body_fn) do
     bash_with_stdin =
       if stdin != "" do
-        %{bash | env: Map.put(bash.env, "__STDIN__", stdin)}
+        %{bash | interpreter: %{bash.interpreter | stdin: stdin}}
       else
         bash
       end
@@ -73,7 +73,7 @@ defmodule JustBash.Interpreter.Executor.Loop do
   def execute_until(bash, condition, body, stdin, execute_body_fn) do
     bash_with_stdin =
       if stdin != "" do
-        %{bash | env: Map.put(bash.env, "__STDIN__", stdin)}
+        %{bash | interpreter: %{bash.interpreter | stdin: stdin}}
       else
         bash
       end
@@ -180,16 +180,21 @@ defmodule JustBash.Interpreter.Executor.Loop do
 
   # --- While/Until Loop Implementation ---
 
-  defp execute_while_loop(bash, _ctx, %LoopAcc{iterations: iterations} = acc)
-       when iterations >= @max_iterations do
-    {%{
-       stdout: IO.iodata_to_binary(acc.stdout_io),
-       stderr: IO.iodata_to_binary([acc.stderr_io, "loop: iteration limit exceeded\n"]),
-       exit_code: acc.exit_code
-     }, bash}
+  defp execute_while_loop(bash, ctx, acc) do
+    max = Map.get(bash, :max_iterations, @default_max_iterations)
+
+    if acc.iterations >= max do
+      {%{
+         stdout: IO.iodata_to_binary(acc.stdout_io),
+         stderr: IO.iodata_to_binary([acc.stderr_io, "loop: iteration limit exceeded\n"]),
+         exit_code: acc.exit_code
+       }, bash}
+    else
+      execute_while_iteration(bash, ctx, acc)
+    end
   end
 
-  defp execute_while_loop(bash, ctx, acc) do
+  defp execute_while_iteration(bash, ctx, acc) do
     {cond_result, cond_bash} = ctx.execute_fn.(bash, ctx.condition)
 
     should_continue =

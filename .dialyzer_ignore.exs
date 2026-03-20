@@ -17,5 +17,12 @@
   {"lib/just_bash/interpreter/executor/redirection.ex", :pattern_match_cov},
   # format_array_key catch-all handles any type defensively, but dialyzer infers
   # callers only pass float/integer/binary values covered by earlier clauses
-  {"lib/just_bash/commands/awk/evaluator.ex", :pattern_match_cov}
+  {"lib/just_bash/commands/awk/evaluator.ex", :pattern_match_cov},
+  # MapSet.t() is opaque — dialyzer warns when it appears inside struct types
+  # that are used in specs.  State.t() contains MapSet fields for locals and
+  # assoc_arrays, which propagates opaque warnings through JustBash.t() and
+  # every function that accepts/returns it.  These are false positives.
+  {"lib/just_bash/interpreter/state.ex", :contract_with_opaque},
+  {"lib/just_bash.ex", :contract_with_opaque},
+  {"lib/just_bash/sigil.ex", :call_without_opaque}
 ]

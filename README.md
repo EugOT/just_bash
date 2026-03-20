@@ -4,7 +4,7 @@ A simulated bash environment with an in-memory virtual filesystem, written in El
 
 Designed for AI agents that need a secure, sandboxed bash environment.
 
-Supports optional network access via `curl` with secure-by-default URL filtering.
+Supports optional network access via `curl` and `wget` with HTTPS-only enforcement and host allowlists.
 
 > **Note**: This is an Elixir port of [just-bash](https://github.com/vercel-labs/just-bash) by Vercel. The entire codebase was generated through conversational prompting with Claude Opus 4.5 via [OpenCode](https://opencode.ai).
 
@@ -17,7 +17,7 @@ sandbox them or provide safety guarantees for them.
 - The shell only has access to the provided virtual filesystem
 - No access to the real filesystem by default
 - No network access by default
-- Network access can be enabled with URL allowlists
+- Network access can be enabled with host allowlists — HTTPS-only by default
 - Custom commands are outside the sandbox and can bypass the virtual filesystem and network policy
 
 ## Installation
@@ -52,10 +52,11 @@ bash = JustBash.new(
 
 ### Network Access
 
-Network access is disabled by default. Enable it with allowlists:
+Network access is disabled by default. When enabled, only HTTPS is permitted and
+an explicit allowlist is required:
 
 ```elixir
-# Allow specific hosts
+# Allow specific hosts (HTTPS only)
 bash = JustBash.new(
   network: %{
     enabled: true,
@@ -63,9 +64,19 @@ bash = JustBash.new(
   }
 )
 
+# Allow all hosts
+bash = JustBash.new(
+  network: %{enabled: true, allow_list: :all}
+)
+
+# Also allow plain HTTP (not recommended)
+bash = JustBash.new(
+  network: %{enabled: true, allow_list: :all, allow_insecure: true}
+)
+
 # Custom HTTP client for testing
 bash = JustBash.new(
-  network: %{enabled: true},
+  network: %{enabled: true, allow_list: :all},
   http_client: MyMockHttpClient
 )
 ```
@@ -107,14 +118,9 @@ Important caveats:
 ### Execute Script Files
 
 ```elixir
-# Run a script from the real filesystem in the sandbox
-{result, bash} = JustBash.exec_file("script.sh")
-
-# With options
-JustBash.exec_file("script.sh",
-  files: %{"/data/input.txt" => "hello"},
-  network: %{enabled: true}
-)
+# Run a script from the virtual filesystem
+bash = JustBash.new(files: %{"/script.sh" => "echo hello"})
+{result, bash} = JustBash.exec_file(bash, "/script.sh")
 ```
 
 ### Sigil
@@ -135,11 +141,11 @@ result.stdout  #=> "hello\n"
 
 ### File Operations
 
-`cat`, `cp`, `file`, `find`, `ln`, `ls`, `mkdir`, `mv`, `readlink`, `rm`, `stat`, `touch`, `tree`, `du`
+`cat`, `chmod`, `chown`, `cp`, `du`, `file`, `find`, `ln`, `ls`, `mkdir`, `mktemp`, `mv`, `readlink`, `realpath`, `rm`, `stat`, `touch`, `tree`
 
 ### Text Processing
 
-`awk`, `base64`, `comm`, `cut`, `diff`, `expand`, `fold`, `grep`, `head`, `md5sum`, `nl`, `paste`, `rev`, `sed`, `sort`, `tac`, `tail`, `tr`, `uniq`, `wc`, `xargs`
+`awk`, `base64`, `comm`, `cut`, `diff`, `expand`, `fold`, `grep`, `head`, `md5sum`, `nl`, `paste`, `rev`, `sed`, `sha256sum`, `shasum`, `sort`, `tac`, `tail`, `tr`, `uniq`, `wc`, `xargs`
 
 ### Data Processing
 
@@ -147,15 +153,15 @@ result.stdout  #=> "hello\n"
 
 ### Network
 
-`curl`
+`curl`, `wget`
 
 ### Shell Builtins
 
-`echo`, `printf`, `cd`, `pwd`, `export`, `unset`, `set`, `test`, `[`, `[[`, `true`, `false`, `:`, `source`, `.`, `read`, `exit`, `return`, `local`, `declare`, `break`, `continue`, `shift`, `getopts`, `trap`
+`echo`, `printf`, `cd`, `pwd`, `eval`, `export`, `unset`, `set`, `test`, `[`, `[[`, `true`, `false`, `:`, `command`, `source`, `.`, `read`, `exit`, `return`, `local`, `declare`, `typeset`, `break`, `continue`, `shift`, `getopts`, `trap`, `type`
 
 ### Utilities
 
-`basename`, `dirname`, `date`, `env`, `hostname`, `printenv`, `seq`, `sleep`, `tee`, `which`
+`arch`, `basename`, `date`, `dirname`, `env`, `hostname`, `id`, `nproc`, `printenv`, `seq`, `sleep`, `tee`, `uname`, `which`, `whoami`, `yes`
 
 ## Shell Features
 
@@ -168,7 +174,8 @@ result.stdout  #=> "hello\n"
 - **Glob patterns**: `*`, `?`, `[...]`
 - **Control flow**: `if/elif/else/fi`, `for/while/until`, `case/esac`
 - **Functions**: `function name { ... }` or `name() { ... }`
-- **Arrays**: `arr=(...)`, `${arr[0]}`, `${arr[@]}`, `${#arr[@]}`
+- **Indexed arrays**: `arr=(...)`, `${arr[0]}`, `${arr[@]}`, `${#arr[@]}`
+- **Associative arrays**: `declare -A map`, `map[key]=value`, `${map[key]}`
 - **Subshells**: `(cmd)` and command groups `{ cmd; }`
 
 ## Default Layout
@@ -192,6 +199,9 @@ result.stderr      # String
 result.exit_code   # Integer
 result.env         # Updated environment
 
+# Execute script from virtual filesystem
+{result, bash} = JustBash.exec_file(bash, "/path/to/script.sh")
+
 # Parse without executing
 {:ok, ast} = JustBash.parse("echo hello")
 
@@ -203,9 +213,9 @@ result.env         # Updated environment
 
 ```bash
 mix deps.get
-mix test           # 2400+ tests
+mix test           # Unit, integration, property-based, and bash-comparison tests
 mix dialyzer       # Type checking
-mix credo          # Linting
+mix credo --strict # Linting
 ```
 
 ## License

@@ -16,6 +16,8 @@ defmodule JustBash.HttpClient do
           timeout: non_neg_integer(),
           follow_redirects: boolean(),
           insecure: boolean()
+          # Note: insecure is always false from library code.
+          # Scripts cannot set this. TLS verification is always enforced.
         }
 
   @type response :: %{

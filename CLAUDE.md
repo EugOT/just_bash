@@ -13,11 +13,16 @@
 6. Full suite passes - no regressions
 ```
 
-### 2. Zero Warnings
+### 2. Zero Warnings — All Tooling Must Pass
 ```bash
-mix compile --warnings-as-errors
+mix compile --warnings-as-errors   # Zero compiler warnings
+mix dialyzer                       # Zero dialyzer errors (skips in .dialyzer_ignore.exs are OK)
+mix credo --strict                 # Clean (only intentional test fixture findings)
+mix format --check-formatted       # Properly formatted
+mix test                           # All tests pass
 ```
-Fix all warnings before committing. No exceptions.
+**Run all five before committing. No exceptions.** A passing test suite alone is not
+sufficient — dialyzer catches type errors and dead code that tests miss.
 
 ### 3. Trust Tests, Not Code
 We do not trust the implementation. Tests are the only source of confidence. Write adversarial tests. Compare against real bash when possible.
@@ -396,6 +401,8 @@ mix test path/to/file.exs:42         # Single test at line
 mix test --only describe:"sed"       # By describe block
 mix test --include bash_comparison   # Include bash tests
 mix compile --warnings-as-errors     # Strict mode
+mix dialyzer                         # Type checking (allow ~5 min first run)
 mix format                           # Format code
+mix format --check-formatted         # Check without modifying
 mix credo --strict                   # Static analysis
 ```

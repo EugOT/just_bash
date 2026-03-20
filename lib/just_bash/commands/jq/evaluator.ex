@@ -12,6 +12,7 @@ defmodule JustBash.Commands.Jq.Evaluator do
   alias JustBash.Commands.Jq.Evaluator.Format
   alias JustBash.Commands.Jq.Evaluator.Functions
   alias JustBash.Commands.Jq.Parser
+  alias JustBash.Fs.InMemoryFs
 
   @doc """
   Evaluate a jq AST against input data.
@@ -67,7 +68,7 @@ defmodule JustBash.Commands.Jq.Evaluator do
   def get_module_meta(module_name, opts) when is_binary(module_name) do
     file_path = resolve_module_path(module_name, opts, %{}, :jq)
 
-    case File.read(file_path) do
+    case read_virtual_file(opts, file_path) do
       {:ok, content} ->
         module_dir = Path.dirname(file_path)
         module_opts = Map.put(opts, :current_module_dir, module_dir)
@@ -2467,7 +2468,7 @@ defmodule JustBash.Commands.Jq.Evaluator do
   defp load_module_data(path, opts, metadata) do
     file_path = resolve_module_path(path, opts, metadata, :data)
 
-    case File.read(file_path) do
+    case read_virtual_file(opts, file_path) do
       {:ok, content} ->
         case Jason.decode(content) do
           {:ok, data} -> data
@@ -2482,7 +2483,7 @@ defmodule JustBash.Commands.Jq.Evaluator do
   defp load_module_funcs(path, opts, metadata) do
     file_path = resolve_module_path(path, opts, metadata, :jq)
 
-    case File.read(file_path) do
+    case read_virtual_file(opts, file_path) do
       {:ok, content} ->
         # Set current_module_dir for relative imports within the module
         module_dir = Path.dirname(file_path)
@@ -2609,13 +2610,13 @@ defmodule JustBash.Commands.Jq.Evaluator do
       # Try direct file
       direct = Path.join(search_dir, path <> ext)
 
-      if File.exists?(direct) do
+      if virtual_file_exists?(opts, direct) do
         direct
       else
         # Try directory/basename.jq pattern
         dir_file = Path.join([search_dir, path, Path.basename(path) <> ext])
 
-        if File.exists?(dir_file) do
+        if virtual_file_exists?(opts, dir_file) do
           dir_file
         else
           nil
@@ -2623,5 +2624,19 @@ defmodule JustBash.Commands.Jq.Evaluator do
       end
     end) ||
       throw({:eval_error, "module not found: #{path}"})
+  end
+
+  defp read_virtual_file(opts, path) do
+    case Map.get(opts, :fs) do
+      nil -> {:error, :no_fs}
+      fs -> InMemoryFs.read_file(fs, path)
+    end
+  end
+
+  defp virtual_file_exists?(opts, path) do
+    case Map.get(opts, :fs) do
+      nil -> false
+      fs -> match?({:ok, _}, InMemoryFs.read_file(fs, path))
+    end
   end
 end

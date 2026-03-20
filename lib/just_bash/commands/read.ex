@@ -17,11 +17,11 @@ defmodule JustBash.Commands.Read do
         names -> names
       end
 
-    # Check for stdin from pipeline (stored in __STDIN__ for while loops)
+    # Check for stdin from pipeline (held in interpreter state for while loops)
     effective_stdin =
       cond do
         stdin != "" -> stdin
-        Map.has_key?(bash.env, "__STDIN__") -> Map.get(bash.env, "__STDIN__")
+        bash.interpreter.stdin != nil -> bash.interpreter.stdin
         true -> ""
       end
 
@@ -39,21 +39,14 @@ defmodule JustBash.Commands.Read do
         # Bash reads the data but returns exit code 1
         [only_line] ->
           new_env = split_and_assign(bash.env, only_line, var_names)
-          new_env = Map.delete(new_env, "__STDIN__")
-          {Command.error("", 1), %{bash | env: new_env}}
+          new_interp = %{bash.interpreter | stdin: nil}
+          {Command.error("", 1), %{bash | env: new_env, interpreter: new_interp}}
 
         # Line followed by more content (or empty string after final newline)
         [first_line, rest] ->
           new_env = split_and_assign(bash.env, first_line, var_names)
-
-          new_env =
-            if rest == "" do
-              Map.delete(new_env, "__STDIN__")
-            else
-              Map.put(new_env, "__STDIN__", rest)
-            end
-
-          {Command.ok(), %{bash | env: new_env}}
+          new_interp = %{bash.interpreter | stdin: if(rest == "", do: nil, else: rest)}
+          {Command.ok(), %{bash | env: new_env, interpreter: new_interp}}
       end
     end
   end

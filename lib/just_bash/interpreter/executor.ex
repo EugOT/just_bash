@@ -549,11 +549,9 @@ defmodule JustBash.Interpreter.Executor do
   end
 
   defp execute_body_with_stdin(bash, statements, stdin) do
-    # Store stdin in bash env temporarily for commands to consume
-    stdin_bash = %{bash | env: Map.put(bash.env, "__STDIN__", stdin)}
+    stdin_bash = %{bash | interpreter: %{bash.interpreter | stdin: stdin}}
     {result, new_bash} = execute_body(stdin_bash, statements)
-    # Remove the temporary stdin
-    final_bash = %{new_bash | env: Map.delete(new_bash.env, "__STDIN__")}
+    final_bash = %{new_bash | interpreter: %{new_bash.interpreter | stdin: nil}}
     {%{stdout: result.stdout, stderr: result.stderr, exit_code: result.exit_code}, final_bash}
   end
 
@@ -561,8 +559,10 @@ defmodule JustBash.Interpreter.Executor do
     # Save caller's positional parameters so we can restore them after the function
     caller_positionals = save_positional_params(bash.env)
 
-    # Save which local-scoped variables the caller already has tracked (for nesting)
-    caller_locals = Map.get(bash.env, "__locals__")
+    # Save interpreter state — function gets a fresh locals tracker and inherits
+    # the caller's assoc_arrays (outer-scope arrays remain visible inside functions)
+    caller_interpreter = bash.interpreter
+    func_interpreter = %{caller_interpreter | locals: MapSet.new()}
 
     positional_env =
       args
@@ -572,32 +572,30 @@ defmodule JustBash.Interpreter.Executor do
       |> Map.put("@", Enum.join(args, " "))
       |> Map.put("*", Enum.join(args, " "))
 
-    # Start a fresh local-variable tracker for this function scope
-    func_env =
-      bash.env
-      |> Map.merge(positional_env)
-      |> Map.put("__locals__", MapSet.new())
-
-    func_bash = %{bash | env: func_env}
+    func_bash = %{bash | env: Map.merge(bash.env, positional_env), interpreter: func_interpreter}
     {result, func_final_bash} = execute_body(func_bash, [body])
 
     # Propagate all side effects (env, fs, functions, etc.) but:
     # 1. Restore the caller's positional parameters ($1..$N, $#, $@, $*)
     # 2. Revert local variables to their caller values (or remove if new)
-    local_names = Map.get(func_final_bash.env, "__locals__", MapSet.new())
+    # 3. Restore caller's interpreter state (locals tracker, drop function-local assoc markers)
+    local_names = func_final_bash.interpreter.locals
 
     restored_env =
       func_final_bash.env
       |> strip_positional_params()
       |> Map.merge(caller_positionals)
       |> revert_locals(local_names, bash.env)
-      |> Map.delete("__locals__")
 
-    # Restore caller's __locals__ tracker if it had one (for nested function calls)
-    restored_env =
-      if caller_locals, do: Map.put(restored_env, "__locals__", caller_locals), else: restored_env
+    # Restore caller's assoc_arrays, discarding any declared inside the function
+    # (fixes the __assoc__* leak where function-local declare -A markers persisted)
+    restored_interpreter = %{
+      func_final_bash.interpreter
+      | locals: caller_interpreter.locals,
+        assoc_arrays: caller_interpreter.assoc_arrays
+    }
 
-    final_bash = %{func_final_bash | env: restored_env}
+    final_bash = %{func_final_bash | env: restored_env, interpreter: restored_interpreter}
     {%{stdout: result.stdout, stderr: result.stderr, exit_code: result.exit_code}, final_bash}
   end
 

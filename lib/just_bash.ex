@@ -53,8 +53,10 @@ defmodule JustBash do
   """
 
   alias JustBash.Formatter
+  alias JustBash.Fs
   alias JustBash.Fs.InMemoryFs
   alias JustBash.Interpreter.Executor
+  alias JustBash.Interpreter.State
   alias JustBash.Parser
   alias JustBash.Parser.Lexer
 
@@ -85,10 +87,13 @@ defmodule JustBash do
             commands: %{},
             exit_code: 0,
             last_exit_code: 0,
-            network: %{enabled: false, allow_list: []},
+            network: %{enabled: false, allow_list: [], allow_insecure: false},
             shell_opts: %{errexit: false, nounset: false, pipefail: false},
             http_client: nil,
-            databases: %{}
+            databases: %{},
+            max_iterations: 10_000,
+            jq_module_paths: [],
+            interpreter: nil
 
   @type exec_result :: %{
           stdout: String.t(),
@@ -99,7 +104,8 @@ defmodule JustBash do
 
   @type network_config :: %{
           enabled: boolean(),
-          allow_list: [String.t()]
+          allow_list: [String.t()] | :all,
+          allow_insecure: boolean()
         }
 
   @type shell_opts :: %{
@@ -118,7 +124,10 @@ defmodule JustBash do
           last_exit_code: non_neg_integer(),
           network: network_config(),
           shell_opts: shell_opts(),
-          databases: map()
+          databases: map(),
+          max_iterations: pos_integer(),
+          jq_module_paths: [String.t()],
+          interpreter: State.t()
         }
 
   @doc """
@@ -139,8 +148,16 @@ defmodule JustBash do
     Dispatch order: shell functions > custom commands > builtins.
   - `:network` - Network configuration map with:
     - `:enabled` - Whether network access is allowed (default: false)
-    - `:allow_list` - List of allowed hosts/patterns (default: [] = all allowed when enabled)
+    - `:allow_list` - Allowed hosts/patterns. Use `:all` to allow all hosts, or a list of
+      hostname patterns (e.g. `["api.example.com", "*.github.com"]`). Empty list `[]` blocks
+      all requests. (default: [] = all requests blocked when enabled)
+    - `:allow_insecure` - Whether plain HTTP is permitted. When false (default), only `https://`
+      URLs are allowed. Scripts cannot override this — it is a caller-level control.
   - `:http_client` - Module implementing the HTTP client behaviour (default: uses Req)
+  - `:max_iterations` - Maximum iterations for `while`/`until` loops before they are
+    forcibly stopped. Prevents runaway loops from untrusted scripts (default: 10_000)
+  - `:jq_module_paths` - List of virtual filesystem paths to search for `jq` modules
+    when using `import`/`include` directives (default: [])
 
   ## Examples
 
@@ -160,8 +177,10 @@ defmodule JustBash do
     env = Keyword.get(opts, :env, %{})
     cwd = Keyword.get(opts, :cwd, "/home/user")
     commands = opts |> Keyword.get(:commands, %{}) |> normalize_commands!()
-    network = Keyword.get(opts, :network, %{enabled: false, allow_list: []})
+    network = Keyword.get(opts, :network, %{})
     http_client = Keyword.get(opts, :http_client)
+    max_iterations = Keyword.get(opts, :max_iterations, 10_000)
+    jq_module_paths = Keyword.get(opts, :jq_module_paths, [])
 
     default_env = %{
       "HOME" => cwd,
@@ -182,8 +201,11 @@ defmodule JustBash do
       commands: commands,
       exit_code: 0,
       last_exit_code: 0,
-      network: Map.merge(%{enabled: false, allow_list: []}, network),
-      http_client: http_client
+      network: Map.merge(%{enabled: false, allow_list: [], allow_insecure: false}, network),
+      http_client: http_client,
+      max_iterations: max_iterations,
+      jq_module_paths: jq_module_paths,
+      interpreter: State.new()
     }
   end
 
@@ -439,78 +461,28 @@ defmodule JustBash do
   end
 
   @doc """
-  Execute a bash script from a file on the real filesystem.
+  Execute a bash script from a path in the virtual filesystem.
 
-  Reads the script from disk and executes it in the JustBash sandbox.
-  This is useful for development and testing scripts stored in real files.
-
-  ## Options
-
-  All options from `new/1` are supported, plus:
-  - `:print` - Print stdout/stderr to console (default: true)
+  Reads the script from the sandbox's virtual filesystem and executes it.
+  The script must exist in `bash.fs` — no real filesystem access occurs.
 
   ## Examples
 
-      # Run a script file
-      JustBash.exec_file("~/scripts/test.sh")
+      bash = JustBash.new(files: %{"/script.sh" => "echo hello"})
+      {result, bash} = JustBash.exec_file(bash, "/script.sh")
 
-      # Run with initial files in the sandbox
-      JustBash.exec_file("script.sh", files: %{"/data/input.txt" => "hello"})
-
-      # Run with network enabled
-      JustBash.exec_file("fetch_data.sh", network: %{enabled: true})
-
-      # Get result without printing
-      {result, bash} = JustBash.exec_file("script.sh", print: false)
-
-  ## CLI Usage
-
-      mix run -e 'JustBash.exec_file("script.sh")'
   """
-  @spec exec_file(String.t(), keyword()) :: {exec_result(), t()}
-  def exec_file(path, opts \\ []) do
-    {print, opts} = Keyword.pop(opts, :print, true)
-    expanded_path = Path.expand(path)
+  @spec exec_file(t(), String.t()) :: {exec_result(), t()}
+  def exec_file(%JustBash{} = bash, path) do
+    resolved = Fs.resolve_path(bash.cwd, path)
 
-    case File.read(expanded_path) do
+    case Fs.read_file(bash.fs, resolved) do
       {:ok, script} ->
-        bash = new(opts)
-        {result, bash} = exec(bash, script)
+        exec(bash, script)
 
-        if print do
-          if result.stdout != "", do: IO.write(result.stdout)
-          if result.stderr != "", do: IO.write(:stderr, result.stderr)
-
-          if result.exit_code != 0 do
-            IO.puts(:stderr, "\n[exit code: #{result.exit_code}]")
-          end
-        end
-
-        {result, bash}
-
-      {:error, reason} ->
-        error_msg = "Cannot read file '#{path}': #{:file.format_error(reason)}\n"
-
-        if print do
-          IO.write(:stderr, error_msg)
-        end
-
-        {%{stdout: "", stderr: error_msg, exit_code: 1, env: %{}}, new(opts)}
+      {:error, _reason} ->
+        error_msg = "#{path}: No such file or directory\n"
+        {%{stdout: "", stderr: error_msg, exit_code: 1, env: bash.env}, bash}
     end
-  end
-
-  @doc """
-  Execute a bash script file, raising on file read errors.
-
-  ## Examples
-
-      {result, bash} = JustBash.exec_file!("script.sh")
-  """
-  @spec exec_file!(String.t(), keyword()) :: {exec_result(), t()}
-  def exec_file!(path, opts \\ []) do
-    expanded_path = Path.expand(path)
-    script = File.read!(expanded_path)
-    bash = new(opts)
-    exec(bash, script)
   end
 end

@@ -100,6 +100,7 @@ defmodule JustBash.Commands.JqSpecTest do
   use ExUnit.Case, async: true
 
   alias JustBash.Commands.Jq.{Evaluator, Parser}
+  alias JustBash.Fs.InMemoryFs
 
   @moduletag :jq_spec
 
@@ -153,7 +154,11 @@ defmodule JustBash.Commands.JqSpecTest do
           else
             # Evaluate
             modules_dir = Path.expand("../command_spec_cases/jq/modules", __DIR__)
-            eval_opts = %{module_paths: [modules_dir]}
+
+            eval_opts = %{
+              module_paths: ["/modules"],
+              fs: load_modules_into_fs(modules_dir, "/modules")
+            }
 
             case Evaluator.evaluate(ast, input_data, eval_opts) do
               {:ok, results} ->
@@ -202,7 +207,11 @@ defmodule JustBash.Commands.JqSpecTest do
         {:ok, ast} ->
           # Parsed OK, but evaluation should fail
           modules_dir = Path.expand("../command_spec_cases/jq/modules", __DIR__)
-          eval_opts = %{module_paths: [modules_dir]}
+
+          eval_opts = %{
+            module_paths: ["/modules"],
+            fs: load_modules_into_fs(modules_dir, "/modules")
+          }
 
           case Evaluator.evaluate(ast, nil, eval_opts) do
             {:error, _msg} ->
@@ -285,6 +294,32 @@ defmodule JustBash.Commands.JqSpecTest do
   end
 
   # Try to parse raw expected values that Jason can't handle (extreme numbers, etc.)
+  # Recursively load all files from a real directory into a virtual FS,
+  # mounting them under virtual_root. Used to feed jq spec fixture modules
+  # into the virtual FS so the evaluator never touches the real filesystem.
+  defp load_modules_into_fs(real_dir, virtual_root) do
+    real_dir
+    |> File.ls!()
+    |> Enum.reduce(InMemoryFs.new(), fn entry, fs ->
+      real_path = Path.join(real_dir, entry)
+      virtual_path = Path.join(virtual_root, entry)
+
+      if File.dir?(real_path) do
+        load_modules_into_fs(real_path, virtual_path) |> merge_fs(fs)
+      else
+        {:ok, fs} = InMemoryFs.write_file(fs, virtual_path, File.read!(real_path))
+        fs
+      end
+    end)
+  end
+
+  defp merge_fs(source_fs, target_fs) do
+    source_fs.data
+    |> Enum.reduce(target_fs, fn {path, entry}, fs ->
+      %{fs | data: Map.put(fs.data, path, entry)}
+    end)
+  end
+
   defp parse_raw_expected(line) do
     # Try to match extreme scientific notation like 9E+999999999
     case Regex.run(~r/^([+-]?\d+(?:\.\d+)?)[eE]([+-]?\d+)$/, line) do
