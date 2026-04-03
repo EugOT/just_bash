@@ -292,4 +292,55 @@ defmodule JustBash.Shell.VariablesTest do
       assert result.stdout == "8\n"
     end
   end
+
+  describe "special variables" do
+    test "$# is 0 at top level" do
+      bash = JustBash.new()
+      {result, _} = JustBash.exec(bash, ~S(echo $#))
+      assert result.stdout == "0\n"
+    end
+
+    test "$# followed by literal text" do
+      bash = JustBash.new()
+      {result, _} = JustBash.exec(bash, ~S(echo $#args))
+      assert result.stdout == "0args\n"
+    end
+
+    test "$? is 0 after successful command" do
+      bash = JustBash.new()
+      {result, _} = JustBash.exec(bash, ~S(true; echo $?))
+      assert result.stdout == "0\n"
+    end
+
+    test "$? followed by literal text" do
+      bash = JustBash.new()
+      {result, _} = JustBash.exec(bash, ~S(true; echo $?foo))
+      assert result.stdout == "0foo\n"
+    end
+
+    test "$$ is a numeric PID" do
+      bash = JustBash.new()
+      {result, _} = JustBash.exec(bash, ~S(echo $$))
+      pid = String.trim(result.stdout)
+      assert String.match?(pid, ~r/^[0-9]+$/)
+    end
+
+    test "$$ followed by literal text" do
+      bash = JustBash.new()
+      {result, _} = JustBash.exec(bash, ~S(echo $$x))
+      assert result.stdout =~ ~r/^[0-9]+x\n$/
+    end
+
+    test "$# reflects argument count inside function" do
+      bash = JustBash.new()
+
+      {result, _} =
+        JustBash.exec(bash, """
+        f() { echo $#; }
+        f a b c
+        """)
+
+      assert result.stdout == "3\n"
+    end
+  end
 end

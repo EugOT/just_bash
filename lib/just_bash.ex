@@ -195,6 +195,7 @@ defmodule JustBash do
       "PWD" => cwd,
       "OLDPWD" => cwd,
       "?" => "0",
+      "#" => "0",
       # Simulated PID for the sandboxed shell
       "$" => Integer.to_string(:erlang.unique_integer([:positive]) |> rem(100_000))
     }
@@ -414,11 +415,17 @@ defmodule JustBash do
 
   ## Examples
 
-      tokens = JustBash.tokenize("echo hello")
+      {:ok, tokens} = JustBash.tokenize("echo hello")
       # [%Token{type: :name, value: "echo", ...}, %Token{type: :name, value: "hello", ...}, ...]
   """
-  @spec tokenize(String.t()) :: [Lexer.Token.t()]
+  @spec tokenize(String.t()) :: {:ok, [Lexer.Token.t()]} | {:error, Lexer.Error.t()}
   def tokenize(input), do: Lexer.tokenize(input)
+
+  @doc """
+  Tokenize a bash command string, raising on error.
+  """
+  @spec tokenize!(String.t()) :: [Lexer.Token.t()]
+  def tokenize!(input), do: Lexer.tokenize!(input)
 
   @doc """
   Format a bash script into a consistent, readable format.

@@ -8,7 +8,7 @@ defmodule JustBash.Parser do
   Complex functionality is delegated to submodules:
   - `Parser.Compound` - if/for/while/case and other compound commands
   - `Parser.Redirection` - File redirections (>, >>, <, etc.)
-  - `Parser.Heredoc` - Heredoc content handling
+  - `Parser.Heredoc` - Heredoc content handling (parser-level, fills heredoc body into AST)
 
   Grammar (simplified):
     script       ::= statement*
@@ -63,16 +63,17 @@ defmodule JustBash.Parser do
   @doc """
   Parse a bash script string into an AST.
   """
-  @spec parse(String.t()) :: {:ok, AST.Script.t()} | {:error, ParseError.t()}
+  @spec parse(String.t()) :: {:ok, AST.Script.t()} | {:error, ParseError.t() | Lexer.Error.t()}
   def parse(input) when is_binary(input) do
-    tokens = Lexer.tokenize(input)
-    parser = %__MODULE__{tokens: tokens, pos: 0}
+    with {:ok, tokens} <- Lexer.tokenize(input) do
+      parser = %__MODULE__{tokens: tokens, pos: 0}
 
-    try do
-      {ast, _parser} = parse_script(parser)
-      {:ok, ast}
-    rescue
-      e in ParseError -> {:error, e}
+      try do
+        {ast, _parser} = parse_script(parser)
+        {:ok, ast}
+      rescue
+        e in ParseError -> {:error, e}
+      end
     end
   end
 

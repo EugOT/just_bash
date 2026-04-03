@@ -4,7 +4,7 @@ defmodule JustBashTest do
 
   describe "tokenize/1" do
     test "tokenizes simple command" do
-      tokens = JustBash.tokenize("echo hello")
+      {:ok, tokens} = JustBash.tokenize("echo hello")
       assert length(tokens) == 3
       assert Enum.at(tokens, 0).type == :name
       assert Enum.at(tokens, 0).value == "echo"
@@ -14,32 +14,32 @@ defmodule JustBashTest do
     end
 
     test "tokenizes operators" do
-      tokens = JustBash.tokenize("a && b || c")
+      {:ok, tokens} = JustBash.tokenize("a && b || c")
       types = Enum.map(tokens, & &1.type)
       assert :and_and in types
       assert :or_or in types
     end
 
     test "tokenizes pipe" do
-      tokens = JustBash.tokenize("ls | grep foo")
+      {:ok, tokens} = JustBash.tokenize("ls | grep foo")
       types = Enum.map(tokens, & &1.type)
       assert :pipe in types
     end
 
     test "tokenizes redirections" do
-      tokens = JustBash.tokenize("echo hello > file.txt")
+      {:ok, tokens} = JustBash.tokenize("echo hello > file.txt")
       types = Enum.map(tokens, & &1.type)
       assert :great in types
     end
 
     test "tokenizes assignment" do
-      tokens = JustBash.tokenize("VAR=value")
+      {:ok, tokens} = JustBash.tokenize("VAR=value")
       assert Enum.at(tokens, 0).type == :assignment_word
       assert Enum.at(tokens, 0).value == "VAR=value"
     end
 
     test "tokenizes reserved words" do
-      tokens = JustBash.tokenize("if then else fi")
+      {:ok, tokens} = JustBash.tokenize("if then else fi")
       types = Enum.map(tokens, & &1.type)
       assert :if in types
       assert :then in types

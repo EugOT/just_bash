@@ -1,575 +1,20 @@
 defmodule JustBash.Parser.Lexer do
   @moduledoc """
-  NimbleParsec-based Lexer for Bash Scripts.
+  Hand-written lexer for bash scripts.
 
-  A declarative, idiomatic Elixir lexer using parser combinators.
-  Handles operators, keywords, words with quoting, heredocs, and more.
-
-  Post-processing is delegated to submodules:
-  - `Lexer.Token` - Token struct and helpers
-  - `Lexer.Heredoc` - Heredoc content handling
-  - `Lexer.BraceExpansion` - Brace expansion merging
+  Processes input as a binary with explicit state tracking, enabling
+  native heredoc body consumption without the limitations of a
+  context-free parser generator.
   """
 
-  import NimbleParsec
-
   alias __MODULE__.BraceExpansion
-  alias __MODULE__.Heredoc
+  alias __MODULE__.Error, as: LexerError
   alias __MODULE__.Token
 
-  # Whitespace (spaces and tabs only - newlines are tokens)
-  whitespace = ascii_string([?\s, ?\t], min: 1) |> ignore()
+  @reserved ~w(if then else elif fi for while until do done case esac in function select time coproc)
+  @max_nesting_depth 200
+  @leading_tabs ~r/^\t+/
 
-  # Line continuation (backslash-newline)
-  line_continuation = string("\\\n") |> ignore()
-
-  # Skip whitespace and line continuations
-  skip_ws =
-    repeat(choice([whitespace, line_continuation]))
-    |> ignore()
-
-  # Comments
-  comment =
-    string("#")
-    |> utf8_string([not: ?\n], min: 0)
-    |> reduce({:make_comment, []})
-
-  # Newline
-  newline = string("\n") |> replace({:newline, "\n"})
-
-  # Three-character operators
-  op3 =
-    choice([
-      string("<<-") |> replace({:dlessdash, "<<-"}),
-      string(";;&") |> replace({:semi_semi_and, ";;&"}),
-      string("<<<") |> replace({:tless, "<<<"}),
-      string("&>>") |> replace({:and_dgreat, "&>>"})
-    ])
-
-  # Two-character operators
-  # Note: (( and )) need special handling - only operators at command position
-  op2 =
-    choice([
-      string("&&") |> replace({:and_and, "&&"}),
-      string("||") |> replace({:or_or, "||"}),
-      string("<<") |> replace({:dless, "<<"}),
-      string(">>") |> replace({:dgreat, ">>"}),
-      string("<&") |> replace({:lessand, "<&"}),
-      string(">&") |> replace({:greatand, ">&"}),
-      string("<>") |> replace({:lessgreat, "<>"}),
-      string(">|") |> replace({:clobber, ">|"}),
-      string("|&") |> replace({:pipe_amp, "|&"}),
-      string(";;") |> replace({:dsemi, ";;"}),
-      string(";&") |> replace({:semi_and, ";&"}),
-      string("&>") |> replace({:and_great, "&>"}),
-      string("[[") |> replace({:dbrack_start, "[["}),
-      string("]]") |> replace({:dbrack_end, "]]"})
-    ])
-
-  # Standalone (( and )) - only match when not preceded by $
-  # We handle this specially - these are matched before words
-  dparen_start =
-    lookahead_not(string("$"))
-    |> string("((")
-    |> replace({:dparen_start, "(("})
-
-  dparen_end = string("))") |> replace({:dparen_end, "))"})
-
-  # Single-char operators
-  # Note: ! is only an operator when not followed by = (!=)
-  op1 =
-    choice([
-      string("|") |> replace({:pipe, "|"}),
-      string("&") |> replace({:amp, "&"}),
-      string(";") |> replace({:semicolon, ";"}),
-      string("(") |> replace({:lparen, "("}),
-      string(")") |> replace({:rparen, ")"}),
-      string("{") |> replace({:lbrace, "{"}),
-      string("}") |> replace({:rbrace, "}"}),
-      string("<") |> replace({:less, "<"}),
-      string(">") |> replace({:great, ">"}),
-      string("!") |> lookahead_not(string("=")) |> replace({:bang, "!"})
-    ])
-
-  operators = choice([op3, op2, dparen_start, dparen_end, op1])
-
-  # ANSI-C quoted string $'...' - interprets escape sequences
-  ansi_c_quoted =
-    string("$'")
-    |> concat(parsec(:ansi_c_content))
-    |> string("'")
-    |> reduce({:build_ansi_c_quoted, []})
-    |> unwrap_and_tag(:ansi_c_quoted)
-
-  # Hex digit for escape sequences
-  hex_digit = ascii_char([?0..?9, ?a..?f, ?A..?F])
-  # Octal digit for escape sequences
-  octal_digit = ascii_char([?0..?7])
-
-  # Content inside $'...' - handles escape sequences
-  defcombinatorp(
-    :ansi_c_content,
-    repeat(
-      choice([
-        # Hex escape: \xNN (1-2 hex digits)
-        string("\\x")
-        |> concat(hex_digit)
-        |> optional(hex_digit)
-        |> reduce({:ansi_c_hex_escape, []}),
-        # Octal escape: \NNN (1-3 octal digits)
-        string("\\")
-        |> concat(octal_digit)
-        |> optional(octal_digit)
-        |> optional(octal_digit)
-        |> reduce({:ansi_c_octal_escape, []}),
-        # Other escape sequences (single char after \)
-        string("\\") |> utf8_char([]) |> reduce({:ansi_c_escape, []}),
-        # Regular characters (not backslash or closing quote)
-        utf8_char([{:not, ?\\}, {:not, ?'}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Single-quoted string
-  single_quoted =
-    ignore(string("'"))
-    |> utf8_string([not: ?'], min: 0)
-    |> ignore(string("'"))
-    |> unwrap_and_tag(:single_quoted)
-
-  # Double-quoted string content - preserves internal content as-is
-  # Handle any escape sequence (backslash followed by any char)
-  dq_escape =
-    string("\\")
-    |> utf8_char([])
-    |> reduce({:build_dq_escape, []})
-
-  # Command substitution inside double quotes - must handle nested quotes properly
-  dq_cmd_subst =
-    string("$(")
-    |> concat(parsec(:dq_cmd_subst_content))
-    |> string(")")
-    |> reduce({:join_chars, []})
-
-  # Parameter expansion inside double quotes
-  dq_param_expansion =
-    string("${")
-    |> concat(parsec(:dq_param_content))
-    |> string("}")
-    |> reduce({:join_chars, []})
-
-  # Backtick substitution inside double quotes
-  dq_backtick =
-    string("`")
-    |> concat(parsec(:dq_backtick_content))
-    |> string("`")
-    |> reduce({:join_chars, []})
-
-  # Arithmetic expansion inside double quotes
-  dq_arith_expansion =
-    string("$((")
-    |> concat(parsec(:dq_arith_content))
-    |> string("))")
-    |> reduce({:join_chars, []})
-
-  # Simple variable inside double quotes
-  dq_simple_var =
-    string("$")
-    |> lookahead_not(choice([string("("), string("{")]))
-    |> utf8_string([?a..?z, ?A..?Z, ?0..?9, ?_, ??, ?$, ?#, ?@, ?*, ?!, ?-], min: 0)
-    |> reduce({:join_chars, []})
-
-  dq_char =
-    choice([
-      dq_escape,
-      dq_arith_expansion,
-      dq_cmd_subst,
-      dq_param_expansion,
-      dq_backtick,
-      dq_simple_var,
-      utf8_char([{:not, ?"}, {:not, ?\\}, {:not, ?$}, {:not, ?`}])
-    ])
-
-  double_quoted =
-    string("\"")
-    |> repeat(dq_char)
-    |> string("\"")
-    |> reduce({:build_double_quoted, []})
-    |> unwrap_and_tag(:double_quoted)
-
-  # Escape outside quotes - preserve the backslash
-  escape_seq =
-    string("\\")
-    |> utf8_char([])
-    |> reduce({:build_escape, []})
-    |> unwrap_and_tag(:escaped)
-
-  # Word characters - excludes operators and special chars
-  # But we need to handle $ and ! specially
-  non_special_word_char =
-    utf8_char([
-      {:not, ?\s},
-      {:not, ?\t},
-      {:not, ?\n},
-      {:not, ?;},
-      {:not, ?&},
-      {:not, ?|},
-      {:not, ?(},
-      {:not, ?)},
-      {:not, ?{},
-      {:not, ?}},
-      {:not, ?<},
-      {:not, ?>},
-      {:not, ?#},
-      {:not, ?'},
-      {:not, ?"},
-      {:not, ?\\},
-      {:not, ?$},
-      {:not, ?!}
-    ])
-
-  # != as a word (for test expressions)
-  not_equal_word =
-    string("!=")
-    |> reduce({:join_chars, []})
-
-  # $ followed by word char (variable like $x) or special ($?, $$, etc)
-  dollar_var =
-    string("$")
-    |> lookahead_not(choice([string("("), string("{")]))
-    |> utf8_string([?a..?z, ?A..?Z, ?0..?9, ?_, ??, ?$, ?#, ?@, ?*, ?!, ?-], min: 0)
-    |> reduce({:join_chars, []})
-
-  # Basic word char is either a non-special char, a dollar-var, or !=
-  basic_word_char =
-    choice([
-      not_equal_word,
-      dollar_var,
-      non_special_word_char
-    ])
-
-  # $(...) command substitution - handles nested parens
-  cmd_subst =
-    string("$(")
-    |> concat(parsec(:cmd_subst_content))
-    |> string(")")
-    |> reduce({:join_chars, []})
-    |> unwrap_and_tag(:chars)
-
-  # Content inside $() - handles nested parens and quotes
-  defcombinatorp(
-    :cmd_subst_content,
-    repeat(
-      choice([
-        # Nested command substitution
-        string("$(") |> concat(parsec(:cmd_subst_content)) |> string(")"),
-        # Nested parens
-        string("(") |> concat(parsec(:paren_content)) |> string(")"),
-        # Single-quoted string (consume entirely - parens inside are literal)
-        string("'") |> concat(parsec(:sq_content)) |> string("'"),
-        # Double-quoted string (consume entirely - parens inside are literal)
-        string("\"") |> concat(parsec(:cmd_subst_dq_content)) |> string("\""),
-        # Escape sequences (backslash escapes next char)
-        string("\\") |> utf8_char([]),
-        # Any char except parens
-        utf8_char([{:not, ?(}, {:not, ?)}, {:not, ?'}, {:not, ?"}, {:not, ?\\}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Double-quoted content inside command substitution (NOT inside outer double quotes)
-  defcombinatorp(
-    :cmd_subst_dq_content,
-    repeat(
-      choice([
-        string("\\") |> utf8_char([]),
-        string("$(") |> concat(parsec(:cmd_subst_content)) |> string(")"),
-        string("${") |> concat(parsec(:param_content)) |> string("}"),
-        utf8_char([{:not, ?"}, {:not, ?\\}, {:not, ?$}]),
-        # Plain $ not followed by ( or {
-        string("$") |> lookahead_not(choice([string("("), string("{")]))
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside regular parens - also handles quotes
-  defcombinatorp(
-    :paren_content,
-    repeat(
-      choice([
-        string("(") |> concat(parsec(:paren_content)) |> string(")"),
-        string("'") |> concat(parsec(:sq_content)) |> string("'"),
-        string("\"") |> concat(parsec(:cmd_subst_dq_content)) |> string("\""),
-        string("\\") |> utf8_char([]),
-        utf8_char([{:not, ?(}, {:not, ?)}, {:not, ?'}, {:not, ?"}, {:not, ?\\}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # $((...)) arithmetic expansion - handles nested parens
-  arith_expansion =
-    string("$((")
-    |> concat(parsec(:arith_content))
-    |> string("))")
-    |> reduce({:join_chars, []})
-    |> unwrap_and_tag(:chars)
-
-  # Content inside $((...)) - handles nested parens
-  defcombinatorp(
-    :arith_content,
-    repeat(
-      choice([
-        string("(") |> concat(parsec(:arith_paren_content)) |> string(")"),
-        utf8_char([{:not, ?(}, {:not, ?)}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside nested parens within $((...))
-  defcombinatorp(
-    :arith_paren_content,
-    repeat(
-      choice([
-        string("(") |> concat(parsec(:arith_paren_content)) |> string(")"),
-        utf8_char([{:not, ?(}, {:not, ?)}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # ${...} parameter expansion - handles nested braces
-  param_expansion =
-    string("${")
-    |> concat(parsec(:param_content))
-    |> string("}")
-    |> reduce({:join_chars, []})
-    |> unwrap_and_tag(:chars)
-
-  # Content inside ${...} - handles nested braces and nested ${}
-  defcombinatorp(
-    :param_content,
-    repeat(
-      choice([
-        string("${") |> concat(parsec(:param_content)) |> string("}"),
-        string("{") |> concat(parsec(:brace_content)) |> string("}"),
-        utf8_char([{:not, ?{}, {:not, ?}}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside nested braces within ${}
-  defcombinatorp(
-    :brace_content,
-    repeat(
-      choice([
-        string("{") |> concat(parsec(:brace_content)) |> string("}"),
-        utf8_char([{:not, ?{}, {:not, ?}}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside $() within double quotes - must handle quotes as part of the content
-  defcombinatorp(
-    :dq_cmd_subst_content,
-    repeat(
-      choice([
-        # Nested command substitution
-        string("$(") |> concat(parsec(:dq_cmd_subst_content)) |> string(")"),
-        # Nested parens
-        string("(") |> concat(parsec(:dq_paren_content)) |> string(")"),
-        # Single-quoted string (consume entirely)
-        string("'") |> concat(parsec(:sq_content)) |> string("'"),
-        # Double-quoted string inside cmd subst (starts a new quote context)
-        string("\"") |> concat(parsec(:nested_dq_content)) |> string("\""),
-        # Escape sequences
-        string("\\") |> utf8_char([]),
-        # Any char except parens
-        utf8_char([{:not, ?(}, {:not, ?)}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside parens within double-quoted command substitution
-  defcombinatorp(
-    :dq_paren_content,
-    repeat(
-      choice([
-        string("(") |> concat(parsec(:dq_paren_content)) |> string(")"),
-        string("'") |> concat(parsec(:sq_content)) |> string("'"),
-        string("\"") |> concat(parsec(:nested_dq_content)) |> string("\""),
-        string("\\") |> utf8_char([]),
-        utf8_char([{:not, ?(}, {:not, ?)}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside single quotes (consume until closing quote)
-  defcombinatorp(
-    :sq_content,
-    repeat(utf8_char([{:not, ?'}]))
-    |> reduce({:join_chars, []})
-  )
-
-  # Simple variable reference (like $x, $PATH, $?, etc)
-  defcombinatorp(
-    :simple_var_ref,
-    string("$")
-    |> lookahead_not(choice([string("("), string("{")]))
-    |> utf8_string([?a..?z, ?A..?Z, ?0..?9, ?_, ??, ?$, ?#, ?@, ?*, ?!, ?-], min: 0)
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside nested double quotes (inside command substitution)
-  defcombinatorp(
-    :nested_dq_content,
-    repeat(
-      choice([
-        string("\\") |> utf8_char([]),
-        string("$((") |> concat(parsec(:dq_arith_content)) |> string("))"),
-        string("$(") |> concat(parsec(:dq_cmd_subst_content)) |> string(")"),
-        string("${") |> concat(parsec(:dq_param_content)) |> string("}"),
-        parsec(:simple_var_ref),
-        utf8_char([{:not, ?"}, {:not, ?\\}, {:not, ?$}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside ${} within double quotes
-  defcombinatorp(
-    :dq_param_content,
-    repeat(
-      choice([
-        string("${") |> concat(parsec(:dq_param_content)) |> string("}"),
-        string("{") |> concat(parsec(:dq_brace_content)) |> string("}"),
-        string("'") |> concat(parsec(:sq_content)) |> string("'"),
-        string("\"") |> concat(parsec(:nested_dq_content)) |> string("\""),
-        utf8_char([{:not, ?{}, {:not, ?}}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside braces within double-quoted parameter expansion
-  defcombinatorp(
-    :dq_brace_content,
-    repeat(
-      choice([
-        string("{") |> concat(parsec(:dq_brace_content)) |> string("}"),
-        utf8_char([{:not, ?{}, {:not, ?}}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside backticks within double quotes
-  defcombinatorp(
-    :dq_backtick_content,
-    repeat(
-      choice([
-        string("\\") |> utf8_char([]),
-        utf8_char([{:not, ?`}, {:not, ?\\}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside $(()) within double quotes
-  defcombinatorp(
-    :dq_arith_content,
-    repeat(
-      choice([
-        string("(") |> concat(parsec(:dq_arith_paren_content)) |> string(")"),
-        utf8_char([{:not, ?(}, {:not, ?)}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # Content inside nested parens within double-quoted arithmetic
-  defcombinatorp(
-    :dq_arith_paren_content,
-    repeat(
-      choice([
-        string("(") |> concat(parsec(:dq_arith_paren_content)) |> string(")"),
-        utf8_char([{:not, ?(}, {:not, ?)}])
-      ])
-    )
-    |> reduce({:join_chars, []})
-  )
-
-  # `...` backtick command substitution
-  backtick_subst =
-    string("`")
-    |> utf8_string([not: ?`], min: 0)
-    |> string("`")
-    |> reduce({:join_chars, []})
-    |> unwrap_and_tag(:chars)
-
-  # Plain word characters (no special chars)
-  word_chars =
-    times(basic_word_char, min: 1)
-    |> reduce({:join_chars, []})
-    |> unwrap_and_tag(:chars)
-
-  # Word parts - order matters! More specific patterns first
-  word_part =
-    choice([
-      ansi_c_quoted,
-      single_quoted,
-      double_quoted,
-      escape_seq,
-      arith_expansion,
-      cmd_subst,
-      param_expansion,
-      backtick_subst,
-      word_chars
-    ])
-
-  # Complete word
-  word =
-    times(word_part, min: 1)
-    |> reduce({:build_word, []})
-
-  # Single token
-  token = choice([comment, newline, operators, word])
-
-  # Full tokenizer
-  defparsec(
-    :do_tokenize,
-    repeat(skip_ws |> concat(token))
-    |> concat(skip_ws)
-    |> eos()
-  )
-
-  # Reduce helpers
-  def make_comment(["#" | rest]) do
-    content = Enum.join(rest)
-    {:comment, "#" <> content}
-  end
-
-  def join_chars(chars) do
-    chars
-    |> Enum.map(fn
-      c when is_integer(c) -> <<c::utf8>>
-      s when is_binary(s) -> s
-    end)
-    |> IO.iodata_to_binary()
-  end
-
-  def build_escape(["\\", c]) when is_integer(c), do: "\\" <> <<c::utf8>>
-  def build_escape([c]) when is_integer(c), do: "\\" <> <<c::utf8>>
-
-  # ANSI-C escape sequence interpretation
   @ansi_c_escape_map %{
     ?n => "\n",
     ?t => "\t",
@@ -585,69 +30,707 @@ defmodule JustBash.Parser.Lexer do
     ?v => "\v"
   }
 
-  def ansi_c_escape(["\\", c]) when is_integer(c) do
-    Map.get(@ansi_c_escape_map, c, <<c::utf8>>)
+  # ── Public API ──────────────────────────────────────────────────────
+
+  @doc """
+  Tokenize input string into a list of tokens.
+
+  Returns `{:ok, tokens}` on success or `{:error, %LexerError{}}` on failure.
+  Use `tokenize!/1` if you prefer exceptions.
+  """
+  @spec tokenize(String.t()) :: {:ok, [Token.t()]} | {:error, LexerError.t()}
+  def tokenize(input) when is_binary(input) do
+    tokens = do_tokenize(input, 0, 1, 1, [], [])
+    tokens = BraceExpansion.process(tokens)
+    {:ok, tokens ++ [Token.eof(input)]}
+  rescue
+    e in LexerError -> {:error, e}
   end
 
-  def ansi_c_escape([c]) when is_integer(c), do: <<c::utf8>>
+  @doc """
+  Tokenize input string into a list of tokens.
 
-  # Handle hex escapes: \xNN
-  def ansi_c_hex_escape(["\\x" | hex_digits]) do
-    hex_str = Enum.map_join(hex_digits, &<<&1::utf8>>)
-    <<String.to_integer(hex_str, 16)>>
+  Raises `JustBash.Parser.Lexer.Error` on failure.
+  """
+  @spec tokenize!(String.t()) :: [Token.t()]
+  def tokenize!(input) when is_binary(input) do
+    case tokenize(input) do
+      {:ok, tokens} -> tokens
+      {:error, error} -> raise error
+    end
   end
 
-  # Handle octal escapes: \NNN
-  def ansi_c_octal_escape(["\\", d1]) when is_integer(d1) do
-    <<String.to_integer(<<d1::utf8>>, 8)>>
+  # ── Main Loop ───────────────────────────────────────────────────────
+  #
+  # Walks the input byte-by-byte, dispatching to specialized readers.
+  # `pending` tracks heredoc delimiters whose bodies have not yet been consumed.
+
+  defp do_tokenize(input, pos, line, col, acc, pending) do
+    {pos, line, col} = skip_ws(input, pos, line, col)
+
+    if pos >= byte_size(input) do
+      Enum.reverse(acc)
+    else
+      tokenize_at(input, pos, line, col, acc, pending)
+    end
   end
 
-  def ansi_c_octal_escape(["\\", d1, d2]) when is_integer(d1) and is_integer(d2) do
-    <<String.to_integer(<<d1::utf8, d2::utf8>>, 8)>>
+  defp tokenize_at(input, pos, line, col, acc, pending) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte == ?\n -> handle_newline(input, pos, line, col, acc, pending)
+      byte == ?# -> handle_comment(input, pos, line, col, acc, pending)
+      true -> handle_operator_or_word(input, pos, line, col, acc, pending, byte)
+    end
   end
 
-  def ansi_c_octal_escape(["\\", d1, d2, d3])
-      when is_integer(d1) and is_integer(d2) and is_integer(d3) do
-    <<String.to_integer(<<d1::utf8, d2::utf8, d3::utf8>>, 8)>>
+  # ── Newline ─────────────────────────────────────────────────────────
+
+  defp handle_newline(input, pos, line, col, acc, pending) do
+    token = mk(:newline, "\n", pos, line, col)
+    acc = [token | acc]
+
+    if pending != [] do
+      {body_tokens, new_pos, new_line} = consume_heredocs(input, pos + 1, line + 1, pending)
+      do_tokenize(input, new_pos, new_line, 1, body_tokens ++ acc, [])
+    else
+      do_tokenize(input, pos + 1, line + 1, 1, acc, [])
+    end
   end
 
-  def build_ansi_c_quoted(["$'" | rest]) do
-    # Last element is the closing quote, content is in between
-    content = rest |> Enum.take(length(rest) - 1) |> join_chars()
-    content
+  # ── Comment ─────────────────────────────────────────────────────────
+
+  defp handle_comment(input, pos, line, col, acc, pending) do
+    end_pos = scan_to_newline(input, pos)
+    text = binary_part(input, pos, end_pos - pos)
+    token = mk(:comment, text, pos, line, col)
+    {_, new_col} = advance(text, line, col)
+    do_tokenize(input, end_pos, line, new_col, [token | acc], pending)
   end
 
-  # Interpret an escape sequence outside quotes - strip the backslash
-  # In bash, \X outside quotes becomes X (the backslash quotes the next character)
-  defp interpret_escape(<<_backslash::utf8, rest::binary>>), do: rest
-  defp interpret_escape(s), do: s
+  # ── Operators ───────────────────────────────────────────────────────
 
-  # In double quotes, preserve escape sequences for word_parts to process
-  # We need to keep \", \\, \$, \` so word_parts can handle them correctly
-  # Only the final expansion phase should interpret these escapes
-  def build_dq_escape(["\\", c]) when c == ?\\ or c == ?" or c == ?$ or c == ?` do
-    "\\" <> <<c::utf8>>
+  defp handle_operator_or_word(input, pos, line, col, acc, pending, byte) do
+    case try_operator(input, pos, byte) do
+      {type, raw, end_pos} ->
+        token = mk(type, raw, pos, line, col)
+        {new_line, new_col} = advance(raw, line, col)
+
+        if type in [:dless, :dlessdash] do
+          read_heredoc_delim_and_continue(
+            input,
+            end_pos,
+            new_line,
+            new_col,
+            [token | acc],
+            pending,
+            type
+          )
+        else
+          do_tokenize(input, end_pos, new_line, new_col, [token | acc], pending)
+        end
+
+      nil ->
+        handle_word(input, pos, line, col, acc, pending)
+    end
   end
 
-  def build_dq_escape(["\\", c]) when is_integer(c) do
-    "\\" <> <<c::utf8>>
+  # Try to match an operator at the current position.
+  # Returns {type, raw_string, end_pos} or nil.
+  defp try_operator(input, pos, byte) do
+    size = byte_size(input)
+    b2 = if pos + 1 < size, do: :binary.at(input, pos + 1)
+    b3 = if pos + 2 < size, do: :binary.at(input, pos + 2)
+
+    # Three-character operators (longest match first)
+    case {byte, b2, b3} do
+      {?<, ?<, ?-} -> {:dlessdash, "<<-", pos + 3}
+      {?<, ?<, ?<} -> {:tless, "<<<", pos + 3}
+      {?;, ?;, ?&} -> {:semi_semi_and, ";;&", pos + 3}
+      {?&, ?>, ?>} -> {:and_dgreat, "&>>", pos + 3}
+      _ -> try_op2(pos, byte, b2)
+    end
   end
 
-  def build_dq_escape([c]) when is_integer(c), do: <<c::utf8>>
+  @two_char_ops %{
+    {?&, ?&} => {:and_and, "&&"},
+    {?|, ?|} => {:or_or, "||"},
+    {?<, ?<} => {:dless, "<<"},
+    {?>, ?>} => {:dgreat, ">>"},
+    {?<, ?&} => {:lessand, "<&"},
+    {?>, ?&} => {:greatand, ">&"},
+    {?<, ?>} => {:lessgreat, "<>"},
+    {?>, ?|} => {:clobber, ">|"},
+    {?|, ?&} => {:pipe_amp, "|&"},
+    {?;, ?;} => {:dsemi, ";;"},
+    {?;, ?&} => {:semi_and, ";&"},
+    {?&, ?>} => {:and_great, "&>"},
+    {?[, ?[} => {:dbrack_start, "[["},
+    {?], ?]} => {:dbrack_end, "]]"},
+    {?(, ?(} => {:dparen_start, "(("},
+    {?), ?)} => {:dparen_end, "))"}
+  }
 
-  def build_double_quoted(parts) do
-    # Keep the full string including quotes for raw_value tracking
-    parts
-    |> Enum.map(fn
-      c when is_integer(c) -> <<c::utf8>>
-      s when is_binary(s) -> s
-    end)
-    |> IO.iodata_to_binary()
+  defp try_op2(pos, byte, b2) do
+    case Map.get(@two_char_ops, {byte, b2}) do
+      {type, raw} -> {type, raw, pos + 2}
+      nil -> try_op1(pos, byte, b2)
+    end
   end
 
-  def build_word(parts) do
-    # Build the display value and track original for assignment detection
-    # quoted/single_quoted flags only true if word STARTS with a quote
+  defp try_op1(pos, byte, b2) do
+    case byte do
+      ?| -> {:pipe, "|", pos + 1}
+      ?& -> {:amp, "&", pos + 1}
+      ?; -> {:semicolon, ";", pos + 1}
+      ?( -> {:lparen, "(", pos + 1}
+      ?) -> {:rparen, ")", pos + 1}
+      ?{ -> {:lbrace, "{", pos + 1}
+      ?} -> {:rbrace, "}", pos + 1}
+      ?< -> {:less, "<", pos + 1}
+      ?> -> {:great, ">", pos + 1}
+      ?! when b2 != ?= -> {:bang, "!", pos + 1}
+      _ -> nil
+    end
+  end
+
+  # ── Words ───────────────────────────────────────────────────────────
+
+  defp handle_word(input, pos, line, col, acc, pending) do
+    {parts, end_pos} = read_word(input, pos)
+
+    if parts == [] do
+      byte = :binary.at(input, pos)
+
+      raise LexerError.unexpected_character(<<byte>>, line, col)
+    end
+
+    {type, value, opts} = build_word(parts)
+    raw_value = Keyword.get(opts, :raw_value, value)
+
+    token = %Token{
+      type: type,
+      value: value,
+      raw_value: raw_value,
+      start: pos,
+      end: end_pos,
+      line: line,
+      column: col,
+      quoted: Keyword.get(opts, :quoted, false),
+      single_quoted: Keyword.get(opts, :single_quoted, false)
+    }
+
+    {new_line, new_col} = advance(raw_value, line, col)
+    do_tokenize(input, end_pos, new_line, new_col, [token | acc], pending)
+  end
+
+  defp read_word(input, pos), do: do_read_word(input, pos, [])
+
+  defp do_read_word(input, pos, parts) do
+    case try_word_part(input, pos) do
+      {part, new_pos} -> do_read_word(input, new_pos, [part | parts])
+      nil -> {Enum.reverse(parts), pos}
+    end
+  end
+
+  defp try_word_part(input, pos) when pos >= byte_size(input), do: nil
+
+  defp try_word_part(input, pos) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte == ?$ -> try_dollar_part(input, pos)
+      byte == ?' -> read_sq(input, pos)
+      byte == ?" -> read_dq(input, pos)
+      byte == ?\\ and pos + 1 < byte_size(input) -> read_escape(input, pos)
+      byte == ?` -> read_backtick(input, pos)
+      byte == ?! and peek(input, pos + 1) == ?= -> {{:chars, "!="}, pos + 2}
+      word_char?(byte) -> read_plain(input, pos)
+      true -> nil
+    end
+  end
+
+  defp try_dollar_part(input, pos) do
+    case peek(input, pos + 1) do
+      ?' ->
+        read_ansi_c(input, pos)
+
+      ?( ->
+        if peek(input, pos + 2) == ?(,
+          do: read_arith(input, pos),
+          else: read_cmd_subst(input, pos)
+
+      ?{ ->
+        read_param_exp(input, pos)
+
+      _ ->
+        read_dollar_var(input, pos)
+    end
+  end
+
+  # ── Word Part Readers ───────────────────────────────────────────────
+
+  # Single-quoted string: '...'
+  defp read_sq(input, pos) do
+    end_pos = scan_to_byte(input, pos + 1, ?')
+
+    if end_pos >= byte_size(input) do
+      {line, col} = pos_to_line_col(input, pos)
+      raise LexerError.unterminated(:single_quote, line, col)
+    end
+
+    content = binary_part(input, pos + 1, end_pos - pos - 1)
+    {{:single_quoted, content}, end_pos + 1}
+  end
+
+  # Double-quoted string: "..."
+  # Returns raw text including outer quotes for downstream expansion.
+  defp read_dq(input, pos) do
+    end_pos = find_close_dq(input, pos + 1)
+
+    if end_pos >= byte_size(input) do
+      {line, col} = pos_to_line_col(input, pos)
+      raise LexerError.unterminated(:double_quote, line, col)
+    end
+
+    raw = binary_part(input, pos, end_pos + 1 - pos)
+    {{:double_quoted, raw}, end_pos + 1}
+  end
+
+  defp find_close_dq(input, pos) when pos >= byte_size(input), do: pos
+
+  defp find_close_dq(input, pos) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte == ?" ->
+        pos
+
+      byte == ?\\ and pos + 1 < byte_size(input) ->
+        find_close_dq(input, pos + 2)
+
+      byte == ?$ and peek(input, pos + 1) == ?( and peek(input, pos + 2) == ?( ->
+        find_close_dq(input, skip_to_close_double_paren(input, pos + 3, pos))
+
+      byte == ?$ and peek(input, pos + 1) == ?( ->
+        find_close_dq(input, skip_balanced(input, pos + 2, ?(, ?)))
+
+      byte == ?$ and peek(input, pos + 1) == ?{ ->
+        find_close_dq(input, skip_balanced(input, pos + 2, ?{, ?}))
+
+      byte == ?` ->
+        find_close_dq(input, skip_past_backtick(input, pos + 1))
+
+      true ->
+        find_close_dq(input, pos + 1)
+    end
+  end
+
+  # ANSI-C quoted string: $'...'
+  defp read_ansi_c(input, pos) do
+    {content, close_pos} = read_ansi_c_content(input, pos + 2, [])
+    {{:ansi_c_quoted, content}, close_pos + 1}
+  end
+
+  defp read_ansi_c_content(input, pos, acc) do
+    cond do
+      pos >= byte_size(input) ->
+        {IO.iodata_to_binary(Enum.reverse(acc)), pos}
+
+      :binary.at(input, pos) == ?' ->
+        {IO.iodata_to_binary(Enum.reverse(acc)), pos}
+
+      :binary.at(input, pos) == ?\\ ->
+        read_ansi_c_escape(input, pos + 1, acc)
+
+      true ->
+        {char, next} = read_utf8_char(input, pos)
+        read_ansi_c_content(input, next, [char | acc])
+    end
+  end
+
+  defp read_ansi_c_escape(input, pos, acc) when pos >= byte_size(input) do
+    read_ansi_c_content(input, pos, acc)
+  end
+
+  defp read_ansi_c_escape(input, pos, acc) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte == ?x ->
+        {val, end_pos} = read_hex_value(input, pos + 1, 0, 0)
+        read_ansi_c_content(input, end_pos, [<<val>> | acc])
+
+      byte in ?0..?7 ->
+        {val, end_pos} = read_octal_value(input, pos, 0, 0)
+        read_ansi_c_content(input, end_pos, [<<val>> | acc])
+
+      true ->
+        interpreted = Map.get(@ansi_c_escape_map, byte, <<byte::utf8>>)
+        read_ansi_c_content(input, pos + 1, [interpreted | acc])
+    end
+  end
+
+  defp read_hex_value(_input, pos, val, count) when count >= 2, do: {val, pos}
+  defp read_hex_value(input, pos, val, _count) when pos >= byte_size(input), do: {val, pos}
+
+  defp read_hex_value(input, pos, val, count) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte in ?0..?9 -> read_hex_value(input, pos + 1, val * 16 + (byte - ?0), count + 1)
+      byte in ?a..?f -> read_hex_value(input, pos + 1, val * 16 + (byte - ?a + 10), count + 1)
+      byte in ?A..?F -> read_hex_value(input, pos + 1, val * 16 + (byte - ?A + 10), count + 1)
+      true -> {val, pos}
+    end
+  end
+
+  defp read_octal_value(_input, pos, val, count) when count >= 3, do: {val, pos}
+  defp read_octal_value(input, pos, val, _count) when pos >= byte_size(input), do: {val, pos}
+
+  defp read_octal_value(input, pos, val, count) do
+    byte = :binary.at(input, pos)
+
+    if byte in ?0..?7 do
+      read_octal_value(input, pos + 1, val * 8 + (byte - ?0), count + 1)
+    else
+      {val, pos}
+    end
+  end
+
+  # Escape sequence outside quotes: \x
+  defp read_escape(input, pos) do
+    {char, next} = read_utf8_char(input, pos + 1)
+    {{:escaped, "\\" <> char}, next}
+  end
+
+  # Arithmetic expansion: $((...))
+  defp read_arith(input, pos) do
+    end_pos = skip_to_close_double_paren(input, pos + 3, pos)
+    raw = binary_part(input, pos, end_pos - pos)
+    {{:chars, raw}, end_pos}
+  end
+
+  # Command substitution: $(...)
+  defp read_cmd_subst(input, pos) do
+    end_pos = skip_balanced(input, pos + 2, ?(, ?), {:command_substitution, pos})
+    raw = binary_part(input, pos, end_pos - pos)
+    {{:chars, raw}, end_pos}
+  end
+
+  # Parameter expansion: ${...}
+  defp read_param_exp(input, pos) do
+    end_pos = skip_balanced(input, pos + 2, ?{, ?}, {:parameter_expansion, pos})
+    raw = binary_part(input, pos, end_pos - pos)
+    {{:chars, raw}, end_pos}
+  end
+
+  # Backtick command substitution: `...`
+  defp read_backtick(input, pos) do
+    end_pos = find_close_backtick(input, pos + 1, pos)
+    raw = binary_part(input, pos, end_pos + 1 - pos)
+    {{:chars, raw}, end_pos + 1}
+  end
+
+  defp find_close_backtick(input, pos, open_pos) when pos >= byte_size(input) do
+    {line, col} = pos_to_line_col(input, open_pos)
+    raise LexerError.unterminated(:backtick, line, col)
+  end
+
+  defp find_close_backtick(input, pos, open_pos) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte == ?` -> pos
+      byte == ?\\ and pos + 1 < byte_size(input) -> find_close_backtick(input, pos + 2, open_pos)
+      true -> find_close_backtick(input, pos + 1, open_pos)
+    end
+  end
+
+  # Dollar variable: $VAR, $?, $$, etc.
+  #
+  # Special variables ($?, $$, $#, $!, $@, $*, $-, $0-$9) consume exactly
+  # one character after `$`. Regular variables consume [a-zA-Z_][a-zA-Z0-9_]*.
+  # A bare `$` at EOF or before a non-variable character produces just "$".
+  @special_var_chars [??, ?$, ?#, ?@, ?*, ?!, ?-]
+
+  defp read_dollar_var(input, pos) do
+    next = pos + 1
+
+    if next >= byte_size(input) do
+      {{:chars, "$"}, next}
+    else
+      byte = :binary.at(input, next)
+
+      cond do
+        byte in @special_var_chars ->
+          {{:chars, binary_part(input, pos, 2)}, next + 1}
+
+        byte >= ?0 and byte <= ?9 ->
+          {{:chars, binary_part(input, pos, 2)}, next + 1}
+
+        ident_start?(byte) ->
+          end_pos = read_ident_tail(input, next + 1)
+          {{:chars, binary_part(input, pos, end_pos - pos)}, end_pos}
+
+        true ->
+          {{:chars, "$"}, next}
+      end
+    end
+  end
+
+  defp ident_start?(b), do: (b >= ?a and b <= ?z) or (b >= ?A and b <= ?Z) or b == ?_
+
+  defp read_ident_tail(input, pos) when pos >= byte_size(input), do: pos
+
+  defp read_ident_tail(input, pos) do
+    byte = :binary.at(input, pos)
+
+    if ident_start?(byte) or (byte >= ?0 and byte <= ?9) do
+      read_ident_tail(input, pos + 1)
+    else
+      pos
+    end
+  end
+
+  # Plain word characters (no special meaning)
+  defp read_plain(input, pos), do: do_read_plain(input, pos, pos)
+
+  defp do_read_plain(input, start, pos) when pos >= byte_size(input) do
+    {{:chars, binary_part(input, start, pos - start)}, pos}
+  end
+
+  defp do_read_plain(input, start, pos) do
+    if word_char?(:binary.at(input, pos)) do
+      do_read_plain(input, start, pos + 1)
+    else
+      {{:chars, binary_part(input, start, pos - start)}, pos}
+    end
+  end
+
+  # ── Balanced Delimiter Skipping ─────────────────────────────────────
+
+  # Internal callers (skip_past_dq, find_close_dq) pass no context — they
+  # tolerate hitting EOF because their own caller handles the error.
+  defp skip_balanced(input, pos, open, close) do
+    do_skip_balanced(input, pos, open, close, 1, nil)
+  end
+
+  # Top-level callers (read_cmd_subst, read_param_exp) pass {context, open_pos}
+  # so we can raise a specific error with position on unterminated input or excessive depth.
+  defp skip_balanced(input, pos, open, close, context) do
+    do_skip_balanced(input, pos, open, close, 1, context)
+  end
+
+  defp do_skip_balanced(input, pos, _open, _close, _depth, context)
+       when pos >= byte_size(input) do
+    case context do
+      {construct, open_pos} ->
+        {line, col} = pos_to_line_col(input, open_pos)
+        raise LexerError.unterminated(construct, line, col)
+
+      nil ->
+        pos
+    end
+  end
+
+  defp do_skip_balanced(input, _pos, _open, _close, depth, context)
+       when depth > @max_nesting_depth do
+    case context do
+      {construct, open_pos} ->
+        {line, col} = pos_to_line_col(input, open_pos)
+        raise LexerError.nesting_depth(construct, line, col)
+
+      nil ->
+        raise LexerError.nesting_depth(:expression)
+    end
+  end
+
+  defp do_skip_balanced(input, pos, open, close, depth, context) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte == close and depth == 1 ->
+        pos + 1
+
+      byte == close ->
+        do_skip_balanced(input, pos + 1, open, close, depth - 1, context)
+
+      byte == open ->
+        do_skip_balanced(input, pos + 1, open, close, depth + 1, context)
+
+      byte == ?' ->
+        do_skip_balanced(input, skip_past_sq(input, pos + 1), open, close, depth, context)
+
+      byte == ?" ->
+        do_skip_balanced(input, skip_past_dq(input, pos + 1), open, close, depth, context)
+
+      byte == ?\\ and pos + 1 < byte_size(input) ->
+        do_skip_balanced(input, pos + 2, open, close, depth, context)
+
+      true ->
+        do_skip_balanced(input, pos + 1, open, close, depth, context)
+    end
+  end
+
+  defp skip_to_close_double_paren(input, pos, open_pos) when pos >= byte_size(input) do
+    {line, col} = pos_to_line_col(input, open_pos)
+    raise LexerError.unterminated(:arithmetic, line, col)
+  end
+
+  defp skip_to_close_double_paren(input, pos, open_pos) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte == ?) and peek(input, pos + 1) == ?) ->
+        pos + 2
+
+      byte == ?( ->
+        skip_to_close_double_paren(input, skip_balanced(input, pos + 1, ?(, ?)), open_pos)
+
+      true ->
+        skip_to_close_double_paren(input, pos + 1, open_pos)
+    end
+  end
+
+  # Skip past a single-quoted string (pos is after the opening ')
+  defp skip_past_sq(input, pos) when pos >= byte_size(input), do: pos
+
+  defp skip_past_sq(input, pos) do
+    if :binary.at(input, pos) == ?', do: pos + 1, else: skip_past_sq(input, pos + 1)
+  end
+
+  # Skip past a double-quoted string (pos is after the opening ")
+  defp skip_past_dq(input, pos) when pos >= byte_size(input), do: pos
+
+  defp skip_past_dq(input, pos) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte == ?" ->
+        pos + 1
+
+      byte == ?\\ and pos + 1 < byte_size(input) ->
+        skip_past_dq(input, pos + 2)
+
+      byte == ?$ and peek(input, pos + 1) == ?( ->
+        skip_past_dq(input, skip_balanced(input, pos + 2, ?(, ?)))
+
+      byte == ?$ and peek(input, pos + 1) == ?{ ->
+        skip_past_dq(input, skip_balanced(input, pos + 2, ?{, ?}))
+
+      byte == ?` ->
+        skip_past_dq(input, skip_past_backtick(input, pos + 1))
+
+      true ->
+        skip_past_dq(input, pos + 1)
+    end
+  end
+
+  # Skip past a backtick string, handling \` escapes (pos is after the opening `)
+  defp skip_past_backtick(input, pos) when pos >= byte_size(input), do: pos
+
+  defp skip_past_backtick(input, pos) do
+    byte = :binary.at(input, pos)
+
+    cond do
+      byte == ?` -> pos + 1
+      byte == ?\\ and pos + 1 < byte_size(input) -> skip_past_backtick(input, pos + 2)
+      true -> skip_past_backtick(input, pos + 1)
+    end
+  end
+
+  # ── Heredoc ─────────────────────────────────────────────────────────
+
+  defp read_heredoc_delim_and_continue(input, pos, line, col, acc, pending, op_type) do
+    strip_tabs = op_type == :dlessdash
+    {pos, line, col} = skip_ws(input, pos, line, col)
+    {parts, end_pos} = read_word(input, pos)
+
+    if parts == [] do
+      raise LexerError.expected_delimiter(line, col)
+    end
+
+    {type, value, opts} = build_word(parts)
+    raw_value = Keyword.get(opts, :raw_value, value)
+    quoted = Keyword.get(opts, :quoted, false)
+    single_quoted = Keyword.get(opts, :single_quoted, false)
+
+    token = %Token{
+      type: type,
+      value: value,
+      raw_value: raw_value,
+      start: pos,
+      end: end_pos,
+      line: line,
+      column: col,
+      quoted: quoted,
+      single_quoted: single_quoted
+    }
+
+    heredoc = %{delimiter: value, strip_tabs: strip_tabs, quoted: quoted || single_quoted}
+    {new_line, new_col} = advance(raw_value, line, col)
+    do_tokenize(input, end_pos, new_line, new_col, [token | acc], [heredoc | pending])
+  end
+
+  defp consume_heredocs(input, pos, line, pending) do
+    do_consume_heredocs(input, pos, line, Enum.reverse(pending), [])
+  end
+
+  defp do_consume_heredocs(_input, pos, line, [], acc), do: {acc, pos, line}
+
+  defp do_consume_heredocs(input, pos, line, [heredoc | rest], acc) do
+    {content, new_pos, new_line} = read_heredoc_body(input, pos, line, heredoc)
+
+    token = %Token{
+      type: :heredoc_content,
+      value: content,
+      start: pos,
+      end: new_pos,
+      line: 0,
+      column: 0
+    }
+
+    do_consume_heredocs(input, new_pos, new_line, rest, [token | acc])
+  end
+
+  defp read_heredoc_body(input, pos, line, heredoc) do
+    do_read_heredoc_body(input, pos, line, heredoc.delimiter, heredoc.strip_tabs, [])
+  end
+
+  defp do_read_heredoc_body(input, pos, line, delimiter, strip_tabs, acc) do
+    if pos >= byte_size(input) do
+      {IO.iodata_to_binary(Enum.reverse(acc)), pos, line}
+    else
+      {raw_line, nl_pos} = read_line_at(input, pos)
+      processed = if strip_tabs, do: String.replace(raw_line, @leading_tabs, ""), else: raw_line
+
+      if processed == delimiter do
+        next_pos = if nl_pos < byte_size(input), do: nl_pos + 1, else: nl_pos
+        {IO.iodata_to_binary(Enum.reverse(acc)), next_pos, line + 1}
+      else
+        has_nl = nl_pos < byte_size(input) and :binary.at(input, nl_pos) == ?\n
+        acc = if has_nl, do: ["\n", processed | acc], else: [processed | acc]
+        next_pos = if has_nl, do: nl_pos + 1, else: nl_pos
+        do_read_heredoc_body(input, next_pos, line + 1, delimiter, strip_tabs, acc)
+      end
+    end
+  end
+
+  defp read_line_at(input, pos), do: do_read_line_at(input, pos, pos)
+
+  defp do_read_line_at(input, start, pos) do
+    cond do
+      pos >= byte_size(input) -> {binary_part(input, start, pos - start), pos}
+      :binary.at(input, pos) == ?\n -> {binary_part(input, start, pos - start), pos}
+      true -> do_read_line_at(input, start, pos + 1)
+    end
+  end
+
+  # ── Word Classification ─────────────────────────────────────────────
+
+  defp build_word(parts) do
     starts_quoted =
       match?([{:single_quoted, _} | _], parts) or
         match?([{:double_quoted, _} | _], parts) or
@@ -662,17 +745,13 @@ defmodule JustBash.Parser.Lexer do
           {acc <> s, raw <> "'" <> s <> "'", true, true}
 
         {:ansi_c_quoted, s}, {acc, raw, _hq, _sq} ->
-          # s is already the interpreted content, raw needs $'...'
           {acc <> s, raw <> "$'" <> escape_for_raw(s) <> "'", true, false}
 
         {:double_quoted, s}, {acc, raw, _hq, sq} ->
-          # s already includes the quotes from build_double_quoted
           inner = String.slice(s, 1..-2//1)
           {acc <> inner, raw <> s, true, sq}
 
         {:escaped, s}, {acc, raw, hq, sq} ->
-          # Outside quotes, backslash escapes the next character
-          # So \' becomes ', \\ becomes \, etc.
           interpreted = interpret_escape(s)
           {acc <> interpreted, raw <> s, hq, sq}
       end)
@@ -684,7 +763,6 @@ defmodule JustBash.Parser.Lexer do
     {type, value, quoted: quoted, single_quoted: single_quoted, raw_value: raw_value}
   end
 
-  # Escape special characters for raw_value reconstruction
   defp escape_for_raw(s) do
     s
     |> String.replace("\\", "\\\\")
@@ -694,7 +772,8 @@ defmodule JustBash.Parser.Lexer do
     |> String.replace("'", "\\'")
   end
 
-  @reserved ~w(if then else elif fi for while until do done case esac in function select time coproc)
+  defp interpret_escape(<<_backslash::utf8, rest::binary>>), do: rest
+  defp interpret_escape(s), do: s
 
   defp classify_word(_value, _raw, true), do: :word
 
@@ -702,90 +781,131 @@ defmodule JustBash.Parser.Lexer do
     cond do
       value in @reserved -> String.to_atom(value)
       assignment?(raw_value) -> :assignment_word
-      Regex.match?(~r/^[0-9]+$/, value) -> :number
-      Regex.match?(~r/^[a-zA-Z_][a-zA-Z0-9_]*$/, value) -> :name
+      all_digits?(value) -> :number
+      name?(value) -> :name
       true -> :word
     end
   end
 
+  defp all_digits?(<<c, rest::binary>>) when c >= ?0 and c <= ?9, do: all_digits?(rest)
+  defp all_digits?(<<>>), do: true
+  defp all_digits?(_), do: false
+
+  defp name?(<<c, rest::binary>>)
+       when (c >= ?a and c <= ?z) or (c >= ?A and c <= ?Z) or c == ?_ do
+    name_tail?(rest)
+  end
+
+  defp name?(_), do: false
+
+  defp name_tail?(<<c, rest::binary>>)
+       when (c >= ?a and c <= ?z) or (c >= ?A and c <= ?Z) or (c >= ?0 and c <= ?9) or c == ?_ do
+    name_tail?(rest)
+  end
+
+  defp name_tail?(<<>>), do: true
+  defp name_tail?(_), do: false
+
+  @assignment_lhs ~r/^[a-zA-Z_][a-zA-Z0-9_]*(\[[^\]]*\])?\+?$/
+
   defp assignment?(value) do
     case String.split(value, "=", parts: 2) do
-      # Match simple variable (foo=), append (foo+=), or array element (arr[n]=, arr[n]+=)
-      [lhs, _rhs] -> Regex.match?(~r/^[a-zA-Z_][a-zA-Z0-9_]*(\[[^\]]*\])?\+?$/, lhs)
+      [lhs, _rhs] -> Regex.match?(@assignment_lhs, lhs)
       _ -> false
     end
   end
 
-  @doc """
-  Tokenize input string into a list of tokens.
-  """
-  @spec tokenize(String.t()) :: [Token.t()]
-  def tokenize(input) when is_binary(input) do
-    case do_tokenize(input) do
-      {:ok, raw_tokens, "", _, _, _} ->
-        tokens = build_tokens(raw_tokens, input, 1, 1, 0, [])
-        tokens = Heredoc.process(tokens, input)
-        tokens = BraceExpansion.process(tokens)
-        tokens ++ [Token.eof(input)]
+  # ── Character Classification ────────────────────────────────────────
 
-      {:error, msg, _rest, _ctx, {line, col}, _off} ->
-        raise "Lexer error at #{line}:#{col}: #{msg}"
-    end
-  end
+  @special_chars [?\s, ?\t, ?\n, ?;, ?&, ?|, ?(, ?), ?{, ?}, ?<, ?>, ?#, ?', ?", ?\\, ?$, ?!, ?`]
 
-  defp build_tokens([], _input, _line, _col, _offset, acc), do: Enum.reverse(acc)
+  defp word_char?(b), do: b not in @special_chars
 
-  defp build_tokens([raw | rest], input, line, col, offset, acc) do
-    {type, value, opts} = normalize(raw)
-    {offset, line, col} = skip_whitespace(input, offset, line, col)
+  # ── Utility ─────────────────────────────────────────────────────────
 
-    raw_value = Keyword.get(opts, :raw_value, value)
-
-    token = %Token{
+  defp mk(type, raw, pos, line, col) do
+    %Token{
       type: type,
-      value: value,
-      raw_value: raw_value,
-      start: offset,
-      end: offset + byte_size(raw_value),
+      value: raw,
+      raw_value: raw,
+      start: pos,
+      end: pos + byte_size(raw),
       line: line,
-      column: col,
-      quoted: Keyword.get(opts, :quoted, false),
-      single_quoted: Keyword.get(opts, :single_quoted, false)
+      column: col
     }
-
-    {new_line, new_col} = advance(raw_value, line, col)
-    build_tokens(rest, input, new_line, new_col, offset + byte_size(raw_value), [token | acc])
   end
 
-  defp normalize({type, value}) when is_atom(type), do: {type, value, []}
-  defp normalize({type, value, opts}), do: {type, value, opts}
+  defp skip_ws(input, pos, line, col) when pos >= byte_size(input), do: {pos, line, col}
 
-  defp skip_whitespace(input, offset, line, col) when offset >= byte_size(input),
-    do: {offset, line, col}
-
-  defp skip_whitespace(input, offset, line, col) do
-    case :binary.at(input, offset) do
+  defp skip_ws(input, pos, line, col) do
+    case :binary.at(input, pos) do
       c when c in [?\s, ?\t] ->
-        skip_whitespace(input, offset + 1, line, col + 1)
+        skip_ws(input, pos + 1, line, col + 1)
 
       ?\\ ->
-        if offset + 1 < byte_size(input) and :binary.at(input, offset + 1) == ?\n do
-          skip_whitespace(input, offset + 2, line + 1, 1)
+        if pos + 1 < byte_size(input) and :binary.at(input, pos + 1) == ?\n do
+          skip_ws(input, pos + 2, line + 1, 1)
         else
-          {offset, line, col}
+          {pos, line, col}
         end
 
       _ ->
-        {offset, line, col}
+        {pos, line, col}
     end
   end
 
-  defp advance(value, line, col) do
-    value
-    |> String.graphemes()
-    |> Enum.reduce({line, col}, fn
-      "\n", {l, _} -> {l + 1, 1}
-      _, {l, c} -> {l, c + 1}
-    end)
+  defp advance(<<?\n, rest::binary>>, line, _col), do: advance(rest, line + 1, 1)
+  defp advance(<<_, rest::binary>>, line, col), do: advance(rest, line, col + 1)
+  defp advance(<<>>, line, col), do: {line, col}
+
+  defp peek(input, pos) when pos >= byte_size(input), do: nil
+  defp peek(input, pos), do: :binary.at(input, pos)
+
+  # Compute line:col for a byte position by scanning from the start.
+  # Only used on error paths, so O(n) cost is acceptable.
+  defp pos_to_line_col(input, target_pos) do
+    do_pos_to_line_col(input, 0, 1, 1, target_pos)
   end
+
+  defp do_pos_to_line_col(_input, pos, line, col, target) when pos >= target, do: {line, col}
+
+  defp do_pos_to_line_col(input, pos, line, col, target) when pos < byte_size(input) do
+    if :binary.at(input, pos) == ?\n do
+      do_pos_to_line_col(input, pos + 1, line + 1, 1, target)
+    else
+      do_pos_to_line_col(input, pos + 1, line, col + 1, target)
+    end
+  end
+
+  defp do_pos_to_line_col(_input, _pos, line, col, _target), do: {line, col}
+
+  defp scan_to_byte(input, pos, byte) do
+    cond do
+      pos >= byte_size(input) -> pos
+      :binary.at(input, pos) == byte -> pos
+      true -> scan_to_byte(input, pos + 1, byte)
+    end
+  end
+
+  defp scan_to_newline(input, pos) do
+    cond do
+      pos >= byte_size(input) -> pos
+      :binary.at(input, pos) == ?\n -> pos
+      true -> scan_to_newline(input, pos + 1)
+    end
+  end
+
+  defp read_utf8_char(input, pos) when pos >= byte_size(input), do: {"", pos}
+
+  defp read_utf8_char(input, pos) do
+    byte = :binary.at(input, pos)
+    char_size = utf8_char_size(byte)
+    actual_size = min(char_size, byte_size(input) - pos)
+    {binary_part(input, pos, actual_size), pos + actual_size}
+  end
+
+  defp utf8_char_size(byte) when byte < 0x80, do: 1
+  defp utf8_char_size(byte) when byte < 0xE0, do: 2
+  defp utf8_char_size(byte) when byte < 0xF0, do: 3
+  defp utf8_char_size(_byte), do: 4
 end
